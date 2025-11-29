@@ -1,0 +1,93 @@
+//@version=5
+strategy("RSI + SuperTrend Pro (BTC 45m) – Hatasız v2025", overlay=true,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+         pyramiding=1, calc_on_every_tick=true)
+
+// ────────────────────── INPUTS ──────────────────────
+rsiPeriod = input.int(14,  "RSI Periyot")
+rsiOB     = input.int(70,  "RSI Aşırı Alım")
+rsiOS     = input.int(30,  "RSI Aşırı Satım")
+atrPeriod = input.int(10,  "SuperTrend ATR Periyot")
+atrMult   = input.float(3.0, "SuperTrend Çarpanı", step=0.1)
+
+tpPerc    = input.float(1.8, "TP %", step=0.1) / 100
+slPerc    = input.float(0.9, "SL %", step=0.1) / 100
+
+showLabels = input.bool(true,  "Al/Sat Etiketleri")
+showArrows    = input.bool(true,  "Yön Okları")
+highlightZone = input.bool(true, "Sinyal Arka Planı")
+
+// ────────────────────── SUPER TREND (Doğru Versiyon) ──────────────────────
+src = hl2
+atr = ta.atr(atrPeriod)
+
+var float up   = na
+var float down = na
+var int   trend = 1
+
+up   := src - atrMult * atr
+down := src + atrMult * atr
+
+up   := up[1] < up ? up : up[1]
+down := down[1] > down ? down : down[1]
+
+trend := close[1] > down[1] ? 1 : close[1] < up[1] ? -1 : nz(trend[1], 1)
+
+upPlot   = trend == 1 ? up : na
+downPlot = trend == -1 ? down : na
+
+plot(upPlot,   "SuperTrend AL",   color=color.new(#00ff00, 0), linewidth=2)
+plot(downPlot, "SuperTrend SAT",  color=color.new(#ff0000, 0), linewidth=2)
+
+// ────────────────────── RSI ──────────────────────
+rsi = ta.rsi(close, rsiPeriod)
+
+// ────────────────────── SİNYALLER ──────────────────────
+longCond  = ta.crossover(rsi, rsiOS) and trend == 1
+shortCond = ta.crossunder(rsi, rsiOB) and trend == -1
+
+// ────────────────────── GİRİŞLER ──────────────────────
+if longCond
+    strategy.entry("Long", strategy.long)
+
+if shortCond
+    strategy.entry("Short", strategy.short)
+
+// ────────────────────── TP / SL (Giriş fiyatına göre sabit) ──────────────────────
+longTP  = strategy.position_size > 0 ? strategy.position_avg_price * (1 + tpPerc) : na
+longSL  = strategy.position_size > 0 ? strategy.position_avg_price * (1 - slPerc) : na
+shortTP = strategy.position_size < 0 ? strategy.position_avg_price * (1 - tpPerc) : na
+shortSL = strategy.position_size < 0 ? strategy.position_avg_price * (1 + slPerc) : na
+
+strategy.exit("L Exit", from_entry="Long",  limit=longTP, stop=longSL)
+strategy.exit("S Exit", from_entry="Short", limit=shortTP, stop=shortSL)
+
+// ────────────────────── GÖRSEL (Hepsi global scope'ta!) ──────────────────────
+// Arka plan
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 94) : na)
+bgcolor(strategy.position_size < 0 ? color.new(color.red,   94) : na)
+
+// Sinyal anı vurgusu
+bgcolor(highlightZone and longCond  ? color.new(color.green, 85) : na)
+bgcolor(highlightZone and shortCond ? color.new(color.red,   85) : na)
+
+// Etiketler
+plotshape(showLabels and longCond,  title="AL",  location=location.belowbar, style=shape.labelup,   size=size.small, color=#00ff00, text="AL",   textcolor=color.black)
+plotshape(showLabels and shortCond, title="SAT", location=location.abovebar, style=shape.labeldown, size=size.small, color=#ff0000, text="SAT",  textcolor=color.white)
+
+// Oklar
+plotarrow(showArrows and longCond  ? 1 : na, colorup=#00ff88, maxheight=50, minheight=30, offset=0)
+plotarrow(showArrows and shortCond ? -1 : na, colordown=#ff4488, maxheight=50, minheight=30, offset=0)
+
+// TP/SL çizgileri
+plot(longTP,  color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=1, title="Long TP")
+plot(longSL,  color=color.new(color.red,  0), style=plot.style_linebr, linewidth=1, title="Long SL")
+plot(shortTP, color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=1, title="Short TP")
+plot(shortSL, color=color.new(color.red,  0), style=plot.style_linebr, linewidth=1, title="Short SL")
+
+// Giriş fiyatı
+plot(strategy.position_size != 0 ? strategy.position_avg_price : na, color=color.yellow, linewidth=1, style=plot.style_linebr)
+
+// ────────────────────── ALERTS ──────────────────────
+alertcondition(longCond,  title="AL Sinyali",  message="BTCUSDT 45m → RSI+SuperTrend AL!")
+alertcondition(shortCond, title="SAT Sinyali", message="BTCUSDT 45m → RSI+SuperTrend SAT!")
