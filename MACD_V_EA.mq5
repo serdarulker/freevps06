@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "MACD-V EA"
 #property link      ""
-#property version   "1.00"
+#property version   "2.00"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -64,9 +64,10 @@ CTrade         trade;
 int            handleFastEMA;
 int            handleSlowEMA;
 int            handleATR;
-double         pipValue;
-double         pipPoint;
-datetime       lastBarTime;
+double         g_pipValue;
+double         g_pipPoint;
+int            g_digits;
+int            g_barsTotal;
 
 // MACD-V Buffers
 double         bufferMACDV[];
@@ -84,35 +85,48 @@ int OnInit()
    //--- Input validation
    if(InpFastLength >= InpSlowLength)
    {
-      Print("ERROR: Fast Length must be less than Slow Length");
+      Print("Error: Fast Length (", InpFastLength, ") must be less than Slow Length (", InpSlowLength, ")");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
-   if(InpFastLength <= 0 || InpSlowLength <= 0 || InpSignalLength <= 0 || InpATRLength <= 0)
+   if(InpFastLength < 1 || InpSlowLength < 1 || InpSignalLength < 1 || InpATRLength < 1)
    {
-      Print("ERROR: All length parameters must be greater than 0");
+      Print("Error: All length parameters must be greater than 0");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
    if(InpLotSize <= 0)
    {
-      Print("ERROR: Lot size must be greater than 0");
+      Print("Error: Lot size must be greater than 0");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
    if(InpStopLossPips <= 0 || InpTakeProfitPips <= 0)
    {
-      Print("ERROR: Stop Loss and Take Profit must be greater than 0");
+      Print("Error: Stop Loss and Take Profit must be greater than 0");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
    if(InpStartHour < 0 || InpStartHour > 23 || InpEndHour < 0 || InpEndHour > 23)
    {
-      Print("ERROR: Trading hours must be between 0 and 23");
+      Print("Error: Trading hours must be between 0 and 23");
       return(INIT_PARAMETERS_INCORRECT);
    }
 
-   //--- Calculate pip value
+   if(InpUseBreakeven && InpBreakevenTrigger <= 0)
+   {
+      Print("Error: Breakeven trigger pips must be greater than 0 when breakeven is enabled");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   if(InpUseTrailingStop && InpTrailingStop <= 0)
+   {
+      Print("Error: Trailing stop pips must be greater than 0 when trailing is enabled");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   //--- Initialize pip value and digits
+   g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    CalculatePipValue();
 
    //--- Create indicator handles
@@ -122,11 +136,15 @@ int OnInit()
 
    if(handleFastEMA == INVALID_HANDLE || handleSlowEMA == INVALID_HANDLE || handleATR == INVALID_HANDLE)
    {
-      Print("ERROR: Failed to create indicator handles");
+      Print("Error creating indicator handles. Error: ", GetLastError());
       return(INIT_FAILED);
    }
 
-   //--- Set arrays as series
+   //--- Resize and initialize arrays
+   ArrayResize(bufferMACDV, 100);
+   ArrayResize(bufferSignal, 100);
+   ArrayResize(bufferHistogram, 100);
+
    ArraySetAsSeries(bufferMACDV, true);
    ArraySetAsSeries(bufferSignal, true);
    ArraySetAsSeries(bufferHistogram, true);
@@ -134,23 +152,29 @@ int OnInit()
    ArraySetAsSeries(bufferSlowEMA, true);
    ArraySetAsSeries(bufferATR, true);
 
+   //--- Initialize arrays to zero
+   ArrayInitialize(bufferMACDV, 0);
+   ArrayInitialize(bufferSignal, 0);
+   ArrayInitialize(bufferHistogram, 0);
+
    //--- Initialize trade object
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(10);
-   trade.SetTypeFilling(ORDER_FILLING_IOC);
+   trade.SetTypeFilling(ORDER_FILLING_FOK);
 
-   //--- Initialize last bar time
-   lastBarTime = 0;
+   //--- Initialize bars counter
+   g_barsTotal = 0;
 
    //--- Print initialization info
    Print("===========================================");
-   Print("MACD-V Expert Advisor Initialized");
-   Print("Symbol: ", _Symbol);
-   Print("Timeframe: ", EnumToString(Period()));
-   Print("Pip Value: ", pipValue, " | Pip Point: ", pipPoint);
+   Print("MACD-V Expert Advisor v2.0 Initialized");
+   Print("Symbol: ", _Symbol, " | Period: ", EnumToString(Period()));
+   Print("Pip Value: ", g_pipValue, " | Pip Point: ", g_pipPoint, " | Digits: ", g_digits);
    Print("Fast EMA: ", InpFastLength, " | Slow EMA: ", InpSlowLength);
    Print("Signal Length: ", InpSignalLength, " | ATR Length: ", InpATRLength);
    Print("Stop Loss: ", InpStopLossPips, " pips | Take Profit: ", InpTakeProfitPips, " pips");
+   Print("Breakeven: ", InpUseBreakeven ? "ON" : "OFF", " | Trailing: ", InpUseTrailingStop ? "ON" : "OFF");
+   Print("Spread Filter: ", InpUseSpreadFilter ? "ON (Max: " + DoubleToString(InpMaxSpreadPips, 1) + " pips)" : "OFF");
    Print("Magic Number: ", InpMagicNumber);
    Print("===========================================");
 
@@ -167,7 +191,28 @@ void OnDeinit(const int reason)
    if(handleSlowEMA != INVALID_HANDLE) IndicatorRelease(handleSlowEMA);
    if(handleATR != INVALID_HANDLE) IndicatorRelease(handleATR);
 
-   Print("MACD-V EA Deinitialized. Reason: ", reason);
+   Print("MACD-V EA Deinitialized. Reason: ", GetDeinitReasonText(reason));
+}
+
+//+------------------------------------------------------------------+
+//| Get deinitialization reason text                                  |
+//+------------------------------------------------------------------+
+string GetDeinitReasonText(int reason)
+{
+   switch(reason)
+   {
+      case REASON_PROGRAM:     return "EA terminated";
+      case REASON_REMOVE:      return "EA removed from chart";
+      case REASON_RECOMPILE:   return "EA recompiled";
+      case REASON_CHARTCHANGE: return "Symbol or timeframe changed";
+      case REASON_CHARTCLOSE:  return "Chart closed";
+      case REASON_PARAMETERS:  return "Input parameters changed";
+      case REASON_ACCOUNT:     return "Account changed";
+      case REASON_TEMPLATE:    return "Template applied";
+      case REASON_INITFAILED:  return "OnInit failed";
+      case REASON_CLOSE:       return "Terminal closed";
+      default:                 return "Unknown reason " + IntegerToString(reason);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -175,21 +220,31 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   //--- Update trailing stop on every tick
-   if(InpUseTrailingStop)
+   //--- Always update trailing stop (every tick for tighter management)
+   if(InpUseTrailingStop && CountOpenPositions() > 0)
       UpdateTrailingStop();
 
    //--- Check for new bar
-   datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
-   if(currentBarTime == lastBarTime)
+   int bars = iBars(_Symbol, PERIOD_CURRENT);
+   if(bars == g_barsTotal)
       return;
-   lastBarTime = currentBarTime;
+   g_barsTotal = bars;
 
    //--- Calculate MACD-V
    if(!CalculateMACDV())
    {
-      Print("ERROR: Failed to calculate MACD-V");
+      Print("Error: Failed to calculate MACD-V");
       return;
+   }
+
+   //--- Debug info on first calculation
+   static bool firstRun = true;
+   if(firstRun)
+   {
+      Print("Initial MACD-V values - MACD-V[0]=", DoubleToString(bufferMACDV[0], 2),
+            " Signal[0]=", DoubleToString(bufferSignal[0], 2),
+            " Hist[0]=", DoubleToString(bufferHistogram[0], 2));
+      firstRun = false;
    }
 
    //--- Check trading hours
@@ -199,35 +254,57 @@ void OnTick()
    }
 
    //--- Update breakeven on new bar
-   if(InpUseBreakeven)
+   if(InpUseBreakeven && CountOpenPositions() > 0)
       UpdateBreakeven();
 
-   //--- Check extreme level exit
-   if(InpUseExtremeFilter)
+   //--- Check extreme level exit and reverse close
+   if(CountOpenPositions() > 0)
       CheckExtremeExit();
 
-   //--- Check for close on reverse signal
-   if(InpCloseOnReverse)
-      CheckReverseClose();
-
-   //--- Check spread filter
-   if(InpUseSpreadFilter && !IsSpreadOK())
+   //--- Check for trading signals (only if no open positions)
+   if(CountOpenPositions() == 0)
    {
-      return;
+      //--- Check spread filter
+      if(InpUseSpreadFilter && !IsSpreadOK())
+      {
+         static datetime lastSpreadWarning = 0;
+         if(TimeCurrent() - lastSpreadWarning > 300) // Warn every 5 minutes max
+         {
+            Print("Spread too high: ", DoubleToString(GetCurrentSpreadPips(), 1), " pips (Max: ", InpMaxSpreadPips, ")");
+            lastSpreadWarning = TimeCurrent();
+         }
+         return;
+      }
+
+      //--- Check signals and open positions
+      if(CheckBuySignal())
+      {
+         Print(">>> BUY Signal detected! <<<");
+         OpenBuyPosition();
+      }
+      else if(CheckSellSignal())
+      {
+         Print(">>> SELL Signal detected! <<<");
+         OpenSellPosition();
+      }
    }
+}
 
-   //--- Count current positions
-   if(CountOpenPositions() > 0)
-      return;
+//+------------------------------------------------------------------+
+//| OnTrade - Track position changes                                  |
+//+------------------------------------------------------------------+
+void OnTrade()
+{
+   static int lastPositionCount = 0;
+   int currentCount = CountOpenPositions();
 
-   //--- Check signals and open positions
-   if(CheckBuySignal())
+   if(currentCount != lastPositionCount)
    {
-      OpenBuyPosition();
-   }
-   else if(CheckSellSignal())
-   {
-      OpenSellPosition();
+      if(currentCount < lastPositionCount)
+      {
+         Print("Position closed. Remaining positions: ", currentCount);
+      }
+      lastPositionCount = currentCount;
    }
 }
 
@@ -236,27 +313,26 @@ void OnTick()
 //+------------------------------------------------------------------+
 void CalculatePipValue()
 {
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
 
    // For 5-digit forex pairs (EURUSD, GBPUSD, etc.)
    // For 3-digit JPY pairs (USDJPY, EURJPY, etc.)
-   if(digits == 5 || digits == 3)
+   if(g_digits == 5 || g_digits == 3)
    {
-      pipPoint = point * 10;
-      pipValue = 10.0;
+      g_pipPoint = point * 10;
+      g_pipValue = 10.0;
    }
    // For 4-digit pairs or 2-digit pairs
-   else if(digits == 4 || digits == 2)
+   else if(g_digits == 4 || g_digits == 2)
    {
-      pipPoint = point;
-      pipValue = 1.0;
+      g_pipPoint = point;
+      g_pipValue = 1.0;
    }
    // For indices, metals, crypto (usually 1 or 2 digits)
    else
    {
-      pipPoint = point;
-      pipValue = 1.0;
+      g_pipPoint = point;
+      g_pipValue = 1.0;
    }
 }
 
@@ -265,58 +341,66 @@ void CalculatePipValue()
 //+------------------------------------------------------------------+
 bool CalculateMACDV()
 {
-   int barsNeeded = InpSlowLength + InpSignalLength + 10;
+   int copyCount = 60; // Need extra bars for signal calculation
 
    //--- Copy indicator data
-   if(CopyBuffer(handleFastEMA, 0, 0, barsNeeded, bufferFastEMA) < barsNeeded)
+   if(CopyBuffer(handleFastEMA, 0, 0, copyCount, bufferFastEMA) < copyCount)
+   {
+      Print("Error copying Fast EMA data. Error: ", GetLastError());
       return false;
-   if(CopyBuffer(handleSlowEMA, 0, 0, barsNeeded, bufferSlowEMA) < barsNeeded)
+   }
+   if(CopyBuffer(handleSlowEMA, 0, 0, copyCount, bufferSlowEMA) < copyCount)
+   {
+      Print("Error copying Slow EMA data. Error: ", GetLastError());
       return false;
-   if(CopyBuffer(handleATR, 0, 0, barsNeeded, bufferATR) < barsNeeded)
+   }
+   if(CopyBuffer(handleATR, 0, 0, copyCount, bufferATR) < copyCount)
+   {
+      Print("Error copying ATR data. Error: ", GetLastError());
       return false;
+   }
 
-   //--- Resize MACD-V buffers
-   ArrayResize(bufferMACDV, barsNeeded);
-   ArrayResize(bufferSignal, barsNeeded);
-   ArrayResize(bufferHistogram, barsNeeded);
-   ArraySetAsSeries(bufferMACDV, true);
-   ArraySetAsSeries(bufferSignal, true);
-   ArraySetAsSeries(bufferHistogram, true);
-
-   //--- Calculate MACD-V (newest to oldest in array, but we calculate oldest to newest)
-   for(int i = barsNeeded - 1; i >= 0; i--)
+   //--- Calculate MACD-V for all bars
+   for(int i = 0; i < copyCount && i < 100; i++)
    {
       double macdLine = bufferFastEMA[i] - bufferSlowEMA[i];
+
       if(bufferATR[i] > 0)
-         bufferMACDV[i] = (macdLine / bufferATR[i]) * 100;
+         bufferMACDV[i] = (macdLine / bufferATR[i]) * 100.0;
       else
          bufferMACDV[i] = 0;
    }
 
    //--- Calculate Signal Line (EMA of MACD-V)
-   //--- First, calculate SMA for seed value (from oldest bars)
-   double smaSum = 0;
-   int startIdx = barsNeeded - 1;
-   for(int i = 0; i < InpSignalLength; i++)
+   //--- We need to calculate from oldest to newest for proper EMA
+   double alpha = 2.0 / (InpSignalLength + 1.0);
+
+   //--- First, calculate SMA for the oldest point as seed
+   int seedIndex = copyCount - 1;
+   if(seedIndex >= 100) seedIndex = 99;
+
+   //--- Calculate initial SMA
+   double sum = 0;
+   int smaCount = 0;
+   for(int i = seedIndex; i >= seedIndex - InpSignalLength + 1 && i >= 0; i--)
    {
-      smaSum += bufferMACDV[startIdx - i];
+      sum += bufferMACDV[i];
+      smaCount++;
    }
-   double seedValue = smaSum / InpSignalLength;
 
-   //--- Calculate multiplier for EMA
-   double multiplier = 2.0 / (InpSignalLength + 1);
+   if(smaCount > 0)
+      bufferSignal[seedIndex - InpSignalLength + 1] = sum / smaCount;
+   else
+      bufferSignal[seedIndex - InpSignalLength + 1] = bufferMACDV[seedIndex - InpSignalLength + 1];
 
-   //--- Initialize signal line with seed value
-   bufferSignal[startIdx - InpSignalLength + 1] = seedValue;
-
-   //--- Calculate EMA from oldest to newest (right to left in series array)
-   for(int i = startIdx - InpSignalLength; i >= 0; i--)
+   //--- Calculate EMA from seed point to newest (index 0)
+   for(int i = seedIndex - InpSignalLength; i >= 0; i--)
    {
-      bufferSignal[i] = (bufferMACDV[i] - bufferSignal[i + 1]) * multiplier + bufferSignal[i + 1];
+      bufferSignal[i] = alpha * bufferMACDV[i] + (1.0 - alpha) * bufferSignal[i + 1];
    }
 
    //--- Calculate Histogram
-   for(int i = 0; i < barsNeeded; i++)
+   for(int i = 0; i < copyCount && i < 100; i++)
    {
       bufferHistogram[i] = bufferMACDV[i] - bufferSignal[i];
    }
@@ -330,36 +414,34 @@ bool CalculateMACDV()
 bool CheckBuySignal()
 {
    //--- Histogram crosses above buy signal level
-   if(bufferHistogram[1] <= InpBuySignalLevel && bufferHistogram[0] > InpBuySignalLevel)
-   {
-      //--- Trend Filter: MACD-V > 0 or rising
-      if(InpUseTrendFilter)
-      {
-         if(bufferMACDV[0] <= 0 && bufferMACDV[0] <= bufferMACDV[1])
-            return false;
-      }
+   bool histogramCross = (bufferHistogram[1] <= InpBuySignalLevel && bufferHistogram[0] > InpBuySignalLevel);
 
-      //--- Momentum Filter: Histogram increasing
-      if(InpUseMomentumFilter)
-      {
-         if(bufferHistogram[0] <= bufferHistogram[1])
-            return false;
-      }
+   if(!histogramCross)
+      return false;
 
-      //--- Extreme Filter: Not in overbought zone
-      if(InpUseExtremeFilter)
-      {
-         if(bufferMACDV[0] >= InpExtremeOverbought)
-            return false;
-      }
+   //--- Trend Filter: MACD-V > 0 or rising
+   bool trendFilter = true;
+   if(InpUseTrendFilter)
+      trendFilter = (bufferMACDV[0] > 0 || (bufferMACDV[0] > bufferMACDV[1]));
 
-      Print("BUY Signal Detected - Histogram: ", DoubleToString(bufferHistogram[0], 2),
-            " | MACD-V: ", DoubleToString(bufferMACDV[0], 2),
-            " | Signal: ", DoubleToString(bufferSignal[0], 2));
-      return true;
-   }
+   //--- Momentum Filter: Histogram increasing
+   bool momentumFilter = true;
+   if(InpUseMomentumFilter)
+      momentumFilter = (bufferHistogram[0] > bufferHistogram[1]);
 
-   return false;
+   //--- Extreme Filter: Not in overbought zone
+   bool notOverbought = (bufferMACDV[0] < InpExtremeOverbought);
+
+   //--- Debug output
+   Print("BUY Signal Check - Hist Cross: ", histogramCross,
+         " | Trend: ", trendFilter,
+         " | Momentum: ", momentumFilter,
+         " | Not OB: ", notOverbought);
+   Print("  Hist[1]=", DoubleToString(bufferHistogram[1], 2),
+         " Hist[0]=", DoubleToString(bufferHistogram[0], 2),
+         " MACD-V=", DoubleToString(bufferMACDV[0], 2));
+
+   return (histogramCross && trendFilter && momentumFilter && notOverbought);
 }
 
 //+------------------------------------------------------------------+
@@ -368,36 +450,34 @@ bool CheckBuySignal()
 bool CheckSellSignal()
 {
    //--- Histogram crosses below sell signal level
-   if(bufferHistogram[1] >= InpSellSignalLevel && bufferHistogram[0] < InpSellSignalLevel)
-   {
-      //--- Trend Filter: MACD-V < 0 or falling
-      if(InpUseTrendFilter)
-      {
-         if(bufferMACDV[0] >= 0 && bufferMACDV[0] >= bufferMACDV[1])
-            return false;
-      }
+   bool histogramCross = (bufferHistogram[1] >= InpSellSignalLevel && bufferHistogram[0] < InpSellSignalLevel);
 
-      //--- Momentum Filter: Histogram decreasing
-      if(InpUseMomentumFilter)
-      {
-         if(bufferHistogram[0] >= bufferHistogram[1])
-            return false;
-      }
+   if(!histogramCross)
+      return false;
 
-      //--- Extreme Filter: Not in oversold zone
-      if(InpUseExtremeFilter)
-      {
-         if(bufferMACDV[0] <= InpExtremeOversold)
-            return false;
-      }
+   //--- Trend Filter: MACD-V < 0 or falling
+   bool trendFilter = true;
+   if(InpUseTrendFilter)
+      trendFilter = (bufferMACDV[0] < 0 || (bufferMACDV[0] < bufferMACDV[1]));
 
-      Print("SELL Signal Detected - Histogram: ", DoubleToString(bufferHistogram[0], 2),
-            " | MACD-V: ", DoubleToString(bufferMACDV[0], 2),
-            " | Signal: ", DoubleToString(bufferSignal[0], 2));
-      return true;
-   }
+   //--- Momentum Filter: Histogram decreasing
+   bool momentumFilter = true;
+   if(InpUseMomentumFilter)
+      momentumFilter = (bufferHistogram[0] < bufferHistogram[1]);
 
-   return false;
+   //--- Extreme Filter: Not in oversold zone
+   bool notOversold = (bufferMACDV[0] > InpExtremeOversold);
+
+   //--- Debug output
+   Print("SELL Signal Check - Hist Cross: ", histogramCross,
+         " | Trend: ", trendFilter,
+         " | Momentum: ", momentumFilter,
+         " | Not OS: ", notOversold);
+   Print("  Hist[1]=", DoubleToString(bufferHistogram[1], 2),
+         " Hist[0]=", DoubleToString(bufferHistogram[0], 2),
+         " MACD-V=", DoubleToString(bufferMACDV[0], 2));
+
+   return (histogramCross && trendFilter && momentumFilter && notOversold);
 }
 
 //+------------------------------------------------------------------+
@@ -405,46 +485,58 @@ bool CheckSellSignal()
 //+------------------------------------------------------------------+
 void OpenBuyPosition()
 {
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double sl = 0, tp = 0;
 
    //--- Calculate SL and TP
-   double sl = ask - InpStopLossPips * pipPoint;
-   double tp = ask + InpTakeProfitPips * pipPoint;
+   if(InpStopLossPips > 0)
+      sl = NormalizeDouble(price - InpStopLossPips * g_pipPoint, g_digits);
 
-   //--- Check minimum stop level
-   double minStopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-   if(minStopLevel > 0)
-   {
-      if((ask - sl) < minStopLevel)
-      {
-         sl = ask - minStopLevel - _Point;
-         Print("WARNING: SL adjusted to minimum stop level: ", sl);
-      }
-      if((tp - ask) < minStopLevel)
-      {
-         tp = ask + minStopLevel + _Point;
-         Print("WARNING: TP adjusted to minimum stop level: ", tp);
-      }
-   }
+   if(InpTakeProfitPips > 0)
+      tp = NormalizeDouble(price + InpTakeProfitPips * g_pipPoint, g_digits);
 
    //--- Calculate lot size
-   double lots = CalculateLotSize(InpStopLossPips);
+   double lots = InpLotSize;
+   if(InpUseDynamicLots && sl > 0)
+      lots = CalculateLotSize(MathAbs(price - sl));
+
+   //--- Normalize lot size
    lots = NormalizeLotSize(lots);
 
-   //--- Normalize prices
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   sl = NormalizeDouble(sl, digits);
-   tp = NormalizeDouble(tp, digits);
+   //--- Validate SL/TP distances
+   double minStopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   if(sl > 0 && price - sl < minStopLevel)
+   {
+      sl = NormalizeDouble(price - minStopLevel - g_pipPoint, g_digits);
+      Print("Warning: SL adjusted to meet minimum stop level requirement");
+   }
+
+   if(tp > 0 && tp - price < minStopLevel)
+   {
+      tp = NormalizeDouble(price + minStopLevel + g_pipPoint, g_digits);
+      Print("Warning: TP adjusted to meet minimum stop level requirement");
+   }
 
    //--- Open position
-   if(trade.Buy(lots, _Symbol, ask, sl, tp, InpTradeComment))
+   if(trade.Buy(lots, _Symbol, price, sl, tp, InpTradeComment))
    {
-      Print("BUY Position Opened - Lots: ", lots, " | Entry: ", ask, " | SL: ", sl, " | TP: ", tp);
+      Print("===========================================");
+      Print("=== BUY ORDER OPENED SUCCESSFULLY ===");
+      Print("Ticket: ", trade.ResultOrder());
+      Print("Lot: ", lots, " | Price: ", price);
+      Print("SL: ", sl, " (", InpStopLossPips, " pips) | TP: ", tp, " (", InpTakeProfitPips, " pips)");
+      Print("MACD-V: ", DoubleToString(bufferMACDV[0], 2),
+            " | Signal: ", DoubleToString(bufferSignal[0], 2),
+            " | Histogram: ", DoubleToString(bufferHistogram[0], 2));
+      Print("===========================================");
    }
    else
    {
-      Print("ERROR: Failed to open BUY position. Error: ", GetLastError());
+      Print("!!! Error opening BUY order !!!");
+      Print("Error Code: ", GetLastError());
+      Print("RetCode: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      Print("Price: ", price, " SL: ", sl, " TP: ", tp, " Lots: ", lots);
    }
 }
 
@@ -453,46 +545,58 @@ void OpenBuyPosition()
 //+------------------------------------------------------------------+
 void OpenSellPosition()
 {
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double sl = 0, tp = 0;
 
    //--- Calculate SL and TP
-   double sl = bid + InpStopLossPips * pipPoint;
-   double tp = bid - InpTakeProfitPips * pipPoint;
+   if(InpStopLossPips > 0)
+      sl = NormalizeDouble(price + InpStopLossPips * g_pipPoint, g_digits);
 
-   //--- Check minimum stop level
-   double minStopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-   if(minStopLevel > 0)
-   {
-      if((sl - bid) < minStopLevel)
-      {
-         sl = bid + minStopLevel + _Point;
-         Print("WARNING: SL adjusted to minimum stop level: ", sl);
-      }
-      if((bid - tp) < minStopLevel)
-      {
-         tp = bid - minStopLevel - _Point;
-         Print("WARNING: TP adjusted to minimum stop level: ", tp);
-      }
-   }
+   if(InpTakeProfitPips > 0)
+      tp = NormalizeDouble(price - InpTakeProfitPips * g_pipPoint, g_digits);
 
    //--- Calculate lot size
-   double lots = CalculateLotSize(InpStopLossPips);
+   double lots = InpLotSize;
+   if(InpUseDynamicLots && sl > 0)
+      lots = CalculateLotSize(MathAbs(sl - price));
+
+   //--- Normalize lot size
    lots = NormalizeLotSize(lots);
 
-   //--- Normalize prices
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   sl = NormalizeDouble(sl, digits);
-   tp = NormalizeDouble(tp, digits);
+   //--- Validate SL/TP distances
+   double minStopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   if(sl > 0 && sl - price < minStopLevel)
+   {
+      sl = NormalizeDouble(price + minStopLevel + g_pipPoint, g_digits);
+      Print("Warning: SL adjusted to meet minimum stop level requirement");
+   }
+
+   if(tp > 0 && price - tp < minStopLevel)
+   {
+      tp = NormalizeDouble(price - minStopLevel - g_pipPoint, g_digits);
+      Print("Warning: TP adjusted to meet minimum stop level requirement");
+   }
 
    //--- Open position
-   if(trade.Sell(lots, _Symbol, bid, sl, tp, InpTradeComment))
+   if(trade.Sell(lots, _Symbol, price, sl, tp, InpTradeComment))
    {
-      Print("SELL Position Opened - Lots: ", lots, " | Entry: ", bid, " | SL: ", sl, " | TP: ", tp);
+      Print("===========================================");
+      Print("=== SELL ORDER OPENED SUCCESSFULLY ===");
+      Print("Ticket: ", trade.ResultOrder());
+      Print("Lot: ", lots, " | Price: ", price);
+      Print("SL: ", sl, " (", InpStopLossPips, " pips) | TP: ", tp, " (", InpTakeProfitPips, " pips)");
+      Print("MACD-V: ", DoubleToString(bufferMACDV[0], 2),
+            " | Signal: ", DoubleToString(bufferSignal[0], 2),
+            " | Histogram: ", DoubleToString(bufferHistogram[0], 2));
+      Print("===========================================");
    }
    else
    {
-      Print("ERROR: Failed to open SELL position. Error: ", GetLastError());
+      Print("!!! Error opening SELL order !!!");
+      Print("Error Code: ", GetLastError());
+      Print("RetCode: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      Print("Price: ", price, " SL: ", sl, " TP: ", tp, " Lots: ", lots);
    }
 }
 
@@ -501,83 +605,68 @@ void OpenSellPosition()
 //+------------------------------------------------------------------+
 void UpdateBreakeven()
 {
+   double breakevenTrigger = InpBreakevenTrigger * g_pipPoint;
+   double breakevenPlus = InpBreakevenPlus * g_pipPoint;
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
+      if(ticket <= 0) continue;
 
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
 
-      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      double currentSL = PositionGetDouble(POSITION_SL);
-      double currentTP = PositionGetDouble(POSITION_TP);
-      long posType = PositionGetInteger(POSITION_TYPE);
-
-      double breakevenSL = 0;
-      double currentPrice = 0;
-      double profitPips = 0;
+      double posOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double posSL = PositionGetDouble(POSITION_SL);
+      double posTP = PositionGetDouble(POSITION_TP);
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
       if(posType == POSITION_TYPE_BUY)
       {
-         currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         profitPips = (currentPrice - openPrice) / pipPoint;
-         breakevenSL = openPrice + InpBreakevenPlus * pipPoint;
+         double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double breakevenLevel = NormalizeDouble(posOpenPrice + breakevenPlus, g_digits);
 
-         //--- Check if profit reached breakeven trigger
-         if(profitPips >= InpBreakevenTrigger)
+         //--- Check if price has moved enough to trigger breakeven
+         if(price >= posOpenPrice + breakevenTrigger)
          {
-            //--- Check if trailing stop already moved SL beyond breakeven
-            if(InpUseTrailingStop && currentSL >= breakevenSL)
+            //--- Only modify if current SL is below breakeven level
+            //--- AND trailing stop hasn't already moved SL above breakeven
+            if(posSL < posOpenPrice && (posSL < breakevenLevel || posSL == 0))
             {
-               continue; // Trailing already better
-            }
-
-            //--- Check if SL not already at or above breakeven
-            if(currentSL < breakevenSL)
-            {
-               int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-               breakevenSL = NormalizeDouble(breakevenSL, digits);
-
-               if(trade.PositionModify(ticket, breakevenSL, currentTP))
+               if(trade.PositionModify(ticket, breakevenLevel, posTP))
                {
-                  Print("BREAKEVEN Activated - Ticket: ", ticket, " | New SL: ", breakevenSL);
+                  Print("=== BREAKEVEN ACTIVATED FOR BUY ===");
+                  Print("Ticket: ", ticket, " | New SL: ", breakevenLevel,
+                        " (BE + ", InpBreakevenPlus, " pips)");
                }
                else
                {
-                  Print("ERROR: Failed to modify breakeven. Error: ", GetLastError());
+                  Print("Failed to set breakeven. Error: ", GetLastError());
                }
             }
          }
       }
       else if(posType == POSITION_TYPE_SELL)
       {
-         currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         profitPips = (openPrice - currentPrice) / pipPoint;
-         breakevenSL = openPrice - InpBreakevenPlus * pipPoint;
+         double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double breakevenLevel = NormalizeDouble(posOpenPrice - breakevenPlus, g_digits);
 
-         //--- Check if profit reached breakeven trigger
-         if(profitPips >= InpBreakevenTrigger)
+         //--- Check if price has moved enough to trigger breakeven
+         if(price <= posOpenPrice - breakevenTrigger)
          {
-            //--- Check if trailing stop already moved SL beyond breakeven
-            if(InpUseTrailingStop && currentSL > 0 && currentSL <= breakevenSL)
+            //--- Only modify if current SL is above breakeven level (or not set)
+            //--- AND trailing stop hasn't already moved SL below breakeven
+            if((posSL > posOpenPrice || posSL == 0) && (posSL > breakevenLevel || posSL == 0))
             {
-               continue; // Trailing already better
-            }
-
-            //--- Check if SL not already at or below breakeven
-            if(currentSL == 0 || currentSL > breakevenSL)
-            {
-               int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-               breakevenSL = NormalizeDouble(breakevenSL, digits);
-
-               if(trade.PositionModify(ticket, breakevenSL, currentTP))
+               if(trade.PositionModify(ticket, breakevenLevel, posTP))
                {
-                  Print("BREAKEVEN Activated - Ticket: ", ticket, " | New SL: ", breakevenSL);
+                  Print("=== BREAKEVEN ACTIVATED FOR SELL ===");
+                  Print("Ticket: ", ticket, " | New SL: ", breakevenLevel,
+                        " (BE - ", InpBreakevenPlus, " pips)");
                }
                else
                {
-                  Print("ERROR: Failed to modify breakeven. Error: ", GetLastError());
+                  Print("Failed to set breakeven. Error: ", GetLastError());
                }
             }
          }
@@ -590,86 +679,62 @@ void UpdateBreakeven()
 //+------------------------------------------------------------------+
 void UpdateTrailingStop()
 {
+   double trailingStop = InpTrailingStop * g_pipPoint;
+   double trailingStep = InpTrailingStep * g_pipPoint;
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
+      if(ticket <= 0) continue;
 
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
 
-      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      double currentSL = PositionGetDouble(POSITION_SL);
-      double currentTP = PositionGetDouble(POSITION_TP);
-      long posType = PositionGetInteger(POSITION_TYPE);
-
-      int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-      double minStopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+      double posOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double posSL = PositionGetDouble(POSITION_SL);
+      double posTP = PositionGetDouble(POSITION_TP);
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
 
       if(posType == POSITION_TYPE_BUY)
       {
-         double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         double profitPips = (currentPrice - openPrice) / pipPoint;
+         double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double newSL = NormalizeDouble(price - trailingStop, g_digits);
 
-         //--- Check if enough profit for trailing
-         if(profitPips >= InpTrailingStop)
+         //--- Only trail if price has moved enough from entry
+         if(price > posOpenPrice + trailingStop)
          {
-            double newSL = currentPrice - InpTrailingStop * pipPoint;
-            newSL = NormalizeDouble(newSL, digits);
-
-            //--- Check minimum stop level
-            if(minStopLevel > 0 && (currentPrice - newSL) < minStopLevel)
+            //--- Only update if new SL is better by at least trailing step
+            if(newSL > posSL + trailingStep || posSL == 0)
             {
-               newSL = currentPrice - minStopLevel - _Point;
-               newSL = NormalizeDouble(newSL, digits);
-            }
-
-            //--- Check trailing step
-            if(currentSL > 0 && (newSL - currentSL) < InpTrailingStep * pipPoint)
-            {
-               continue; // Step not reached
-            }
-
-            //--- Move SL only if new SL is better (higher for buy)
-            if(currentSL == 0 || newSL > currentSL)
-            {
-               if(trade.PositionModify(ticket, newSL, currentTP))
+               //--- Make sure new SL is above entry (we're in profit)
+               if(newSL > posOpenPrice)
                {
-                  Print("TRAILING STOP Updated - Ticket: ", ticket, " | New SL: ", newSL, " | Profit Pips: ", profitPips);
+                  if(trade.PositionModify(ticket, newSL, posTP))
+                  {
+                     Print("Trailing stop updated for BUY #", ticket, ": New SL=", newSL);
+                  }
                }
             }
          }
       }
       else if(posType == POSITION_TYPE_SELL)
       {
-         double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         double profitPips = (openPrice - currentPrice) / pipPoint;
+         double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double newSL = NormalizeDouble(price + trailingStop, g_digits);
 
-         //--- Check if enough profit for trailing
-         if(profitPips >= InpTrailingStop)
+         //--- Only trail if price has moved enough from entry
+         if(price < posOpenPrice - trailingStop)
          {
-            double newSL = currentPrice + InpTrailingStop * pipPoint;
-            newSL = NormalizeDouble(newSL, digits);
-
-            //--- Check minimum stop level
-            if(minStopLevel > 0 && (newSL - currentPrice) < minStopLevel)
+            //--- Only update if new SL is better by at least trailing step
+            if(newSL < posSL - trailingStep || posSL == 0)
             {
-               newSL = currentPrice + minStopLevel + _Point;
-               newSL = NormalizeDouble(newSL, digits);
-            }
-
-            //--- Check trailing step
-            if(currentSL > 0 && (currentSL - newSL) < InpTrailingStep * pipPoint)
-            {
-               continue; // Step not reached
-            }
-
-            //--- Move SL only if new SL is better (lower for sell)
-            if(currentSL == 0 || newSL < currentSL)
-            {
-               if(trade.PositionModify(ticket, newSL, currentTP))
+               //--- Make sure new SL is below entry (we're in profit)
+               if(newSL < posOpenPrice)
                {
-                  Print("TRAILING STOP Updated - Ticket: ", ticket, " | New SL: ", newSL, " | Profit Pips: ", profitPips);
+                  if(trade.PositionModify(ticket, newSL, posTP))
+                  {
+                     Print("Trailing stop updated for SELL #", ticket, ": New SL=", newSL);
+                  }
                }
             }
          }
@@ -678,74 +743,59 @@ void UpdateTrailingStop()
 }
 
 //+------------------------------------------------------------------+
-//| Check Extreme Level Exit                                          |
+//| Check Extreme Level Exit and Reverse Close                        |
 //+------------------------------------------------------------------+
 void CheckExtremeExit()
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
+      if(ticket <= 0) continue;
 
       if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
       if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
 
-      long posType = PositionGetInteger(POSITION_TYPE);
+      ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double posProfit = PositionGetDouble(POSITION_PROFIT);
 
-      //--- Close BUY if MACD-V reaches extreme overbought
-      if(posType == POSITION_TYPE_BUY && bufferMACDV[0] >= InpExtremeOverbought)
+      //--- Close BUY if extreme overbought
+      if(InpUseExtremeFilter && posType == POSITION_TYPE_BUY && bufferMACDV[0] >= InpExtremeOverbought)
       {
          if(trade.PositionClose(ticket))
          {
-            Print("EXTREME EXIT - BUY closed at extreme overbought. MACD-V: ", DoubleToString(bufferMACDV[0], 2));
+            Print("=== BUY CLOSED AT EXTREME OVERBOUGHT ===");
+            Print("MACD-V: ", DoubleToString(bufferMACDV[0], 2), " | Profit: ", posProfit);
          }
       }
-      //--- Close SELL if MACD-V reaches extreme oversold
-      else if(posType == POSITION_TYPE_SELL && bufferMACDV[0] <= InpExtremeOversold)
+      //--- Close SELL if extreme oversold
+      else if(InpUseExtremeFilter && posType == POSITION_TYPE_SELL && bufferMACDV[0] <= InpExtremeOversold)
       {
          if(trade.PositionClose(ticket))
          {
-            Print("EXTREME EXIT - SELL closed at extreme oversold. MACD-V: ", DoubleToString(bufferMACDV[0], 2));
+            Print("=== SELL CLOSED AT EXTREME OVERSOLD ===");
+            Print("MACD-V: ", DoubleToString(bufferMACDV[0], 2), " | Profit: ", posProfit);
          }
       }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Check Reverse Close                                               |
-//+------------------------------------------------------------------+
-void CheckReverseClose()
-{
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
-
-      long posType = PositionGetInteger(POSITION_TYPE);
-
-      //--- Close BUY if histogram crosses below sell level
-      if(posType == POSITION_TYPE_BUY)
+      //--- Close BUY if histogram reverses (crosses below buy level)
+      else if(InpCloseOnReverse && posType == POSITION_TYPE_BUY &&
+              bufferHistogram[0] < InpBuySignalLevel && bufferHistogram[1] >= InpBuySignalLevel)
       {
-         if(bufferHistogram[1] >= InpSellSignalLevel && bufferHistogram[0] < InpSellSignalLevel)
+         if(trade.PositionClose(ticket))
          {
-            if(trade.PositionClose(ticket))
-            {
-               Print("REVERSE CLOSE - BUY closed on sell signal. Histogram: ", DoubleToString(bufferHistogram[0], 2));
-            }
+            Print("=== BUY CLOSED ON HISTOGRAM REVERSAL ===");
+            Print("Hist[1]=", DoubleToString(bufferHistogram[1], 2),
+                  " -> Hist[0]=", DoubleToString(bufferHistogram[0], 2));
          }
       }
-      //--- Close SELL if histogram crosses above buy level
-      else if(posType == POSITION_TYPE_SELL)
+      //--- Close SELL if histogram reverses (crosses above sell level)
+      else if(InpCloseOnReverse && posType == POSITION_TYPE_SELL &&
+              bufferHistogram[0] > InpSellSignalLevel && bufferHistogram[1] <= InpSellSignalLevel)
       {
-         if(bufferHistogram[1] <= InpBuySignalLevel && bufferHistogram[0] > InpBuySignalLevel)
+         if(trade.PositionClose(ticket))
          {
-            if(trade.PositionClose(ticket))
-            {
-               Print("REVERSE CLOSE - SELL closed on buy signal. Histogram: ", DoubleToString(bufferHistogram[0], 2));
-            }
+            Print("=== SELL CLOSED ON HISTOGRAM REVERSAL ===");
+            Print("Hist[1]=", DoubleToString(bufferHistogram[1], 2),
+                  " -> Hist[0]=", DoubleToString(bufferHistogram[0], 2));
          }
       }
    }
@@ -754,27 +804,32 @@ void CheckReverseClose()
 //+------------------------------------------------------------------+
 //| Calculate Lot Size Based on Risk                                  |
 //+------------------------------------------------------------------+
-double CalculateLotSize(double slPips)
+double CalculateLotSize(double stopLossDistance)
 {
-   if(!InpUseDynamicLots)
+   if(stopLossDistance <= 0)
       return InpLotSize;
 
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskAmount = balance * InpMaxRiskPercent / 100.0;
+   double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskAmount = accountBalance * InpMaxRiskPercent / 100.0;
 
-   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
 
    if(tickSize == 0 || tickValue == 0)
+   {
+      Print("Warning: Unable to calculate dynamic lot size. Using default.");
       return InpLotSize;
+   }
 
-   double slPoints = slPips * pipValue;
-   double slValue = (slPoints / tickSize) * tickValue;
+   //--- Calculate lots based on risk
+   double lots = riskAmount / (stopLossDistance / tickSize * tickValue);
 
-   if(slValue == 0)
+   //--- Fallback to default if calculation is invalid
+   if(lots <= 0 || !MathIsValidNumber(lots))
+   {
+      Print("Warning: Invalid lot calculation. Using default lot size.");
       return InpLotSize;
-
-   double lots = riskAmount / slValue;
+   }
 
    return lots;
 }
@@ -788,14 +843,20 @@ double NormalizeLotSize(double lots)
    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
+   if(lotStep == 0)
+      lotStep = 0.01;
+
    //--- Round to lot step
    lots = MathFloor(lots / lotStep) * lotStep;
 
-   //--- Apply limits
-   if(lots < minLot) lots = minLot;
-   if(lots > maxLot) lots = maxLot;
+   //--- Ensure within limits
+   lots = MathMax(lots, minLot);
+   lots = MathMin(lots, maxLot);
 
-   return NormalizeDouble(lots, 2);
+   //--- Final normalization
+   lots = NormalizeDouble(lots, 2);
+
+   return lots;
 }
 
 //+------------------------------------------------------------------+
@@ -808,12 +869,11 @@ int CountOpenPositions()
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
+      if(ticket <= 0) continue;
 
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
-
-      count++;
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+         count++;
    }
 
    return count;
@@ -824,11 +884,8 @@ int CountOpenPositions()
 //+------------------------------------------------------------------+
 double GetCurrentSpreadPips()
 {
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double spreadPoints = ask - bid;
-
-   return spreadPoints / pipPoint;
+   double spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   return spread / g_pipPoint;
 }
 
 //+------------------------------------------------------------------+
@@ -836,14 +893,7 @@ double GetCurrentSpreadPips()
 //+------------------------------------------------------------------+
 bool IsSpreadOK()
 {
-   double spreadPips = GetCurrentSpreadPips();
-
-   if(spreadPips > InpMaxSpreadPips)
-   {
-      return false;
-   }
-
-   return true;
+   return GetCurrentSpreadPips() <= InpMaxSpreadPips;
 }
 
 //+------------------------------------------------------------------+
