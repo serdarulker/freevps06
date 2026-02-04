@@ -29,8 +29,13 @@ input bool     InpUseMomentumFilter = true;     // Use Momentum Filter
 
 input group "=== Risk Management ==="
 input double   InpLotSize            = 0.1;     // Lot Size
-input double   InpStopLossPips       = 50.0;    // Stop Loss (Pips)
-input double   InpTakeProfitPips     = 100.0;   // Take Profit (Pips)
+input bool     InpUseATRStops        = true;    // Use ATR-Based SL/TP
+input double   InpATRMultiplier      = 1.5;     // ATR Multiplier for SL
+input double   InpRiskRewardRatio    = 2.0;     // Risk:Reward Ratio (TP = SL x RR)
+input double   InpStopLossPips       = 50.0;    // Fixed Stop Loss (Pips) - if ATR disabled
+input double   InpTakeProfitPips     = 100.0;   // Fixed Take Profit (Pips) - if ATR disabled
+input double   InpMinSLPips          = 10.0;    // Minimum SL (Pips) - ATR floor
+input double   InpMaxSLPips          = 100.0;   // Maximum SL (Pips) - ATR ceiling
 input bool     InpUseBreakeven       = true;    // Use Breakeven
 input double   InpBreakevenTrigger   = 20.0;    // Breakeven Trigger (Pips)
 input double   InpBreakevenPlus      = 5.0;     // Breakeven Plus (Pips)
@@ -125,6 +130,24 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
    }
 
+   if(InpUseATRStops && InpATRMultiplier <= 0)
+   {
+      Print("Error: ATR Multiplier must be greater than 0 when ATR stops are enabled");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   if(InpUseATRStops && InpRiskRewardRatio <= 0)
+   {
+      Print("Error: Risk:Reward ratio must be greater than 0");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   if(InpMinSLPips <= 0 || InpMaxSLPips <= 0 || InpMinSLPips >= InpMaxSLPips)
+   {
+      Print("Error: Min SL must be > 0 and less than Max SL");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
    //--- Initialize pip value and digits
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    CalculatePipValue();
@@ -172,7 +195,15 @@ int OnInit()
    Print("Pip Value: ", g_pipValue, " | Pip Point: ", g_pipPoint, " | Digits: ", g_digits);
    Print("Fast EMA: ", InpFastLength, " | Slow EMA: ", InpSlowLength);
    Print("Signal Length: ", InpSignalLength, " | ATR Length: ", InpATRLength);
-   Print("Stop Loss: ", InpStopLossPips, " pips | Take Profit: ", InpTakeProfitPips, " pips");
+   if(InpUseATRStops)
+   {
+      Print("SL/TP Mode: ATR-Based | ATR Multiplier: ", InpATRMultiplier);
+      Print("R:R Ratio: 1:", DoubleToString(InpRiskRewardRatio, 1), " | SL Range: ", InpMinSLPips, "-", InpMaxSLPips, " pips");
+   }
+   else
+   {
+      Print("SL/TP Mode: Fixed | SL: ", InpStopLossPips, " pips | TP: ", InpTakeProfitPips, " pips");
+   }
    Print("Breakeven: ", InpUseBreakeven ? "ON" : "OFF", " | Trailing: ", InpUseTrailingStop ? "ON" : "OFF");
    Print("Spread Filter: ", InpUseSpreadFilter ? "ON (Max: " + DoubleToString(InpMaxSpreadPips, 1) + " pips)" : "OFF");
    Print("Magic Number: ", InpMagicNumber);
@@ -487,18 +518,50 @@ void OpenBuyPosition()
 {
    double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double sl = 0, tp = 0;
+   double slDistance = 0;
+   double tpDistance = 0;
+   string slType = "Fixed";
 
    //--- Calculate SL and TP
-   if(InpStopLossPips > 0)
-      sl = NormalizeDouble(price - InpStopLossPips * g_pipPoint, g_digits);
+   if(InpUseATRStops)
+   {
+      //--- ATR-based SL calculation
+      double atrValue = GetCurrentATR();
+      slDistance = atrValue * InpATRMultiplier;
 
-   if(InpTakeProfitPips > 0)
-      tp = NormalizeDouble(price + InpTakeProfitPips * g_pipPoint, g_digits);
+      //--- Apply min/max limits
+      double minSL = InpMinSLPips * g_pipPoint;
+      double maxSL = InpMaxSLPips * g_pipPoint;
+      slDistance = MathMax(slDistance, minSL);
+      slDistance = MathMin(slDistance, maxSL);
+
+      //--- Calculate TP based on R:R ratio
+      tpDistance = slDistance * InpRiskRewardRatio;
+
+      sl = NormalizeDouble(price - slDistance, g_digits);
+      tp = NormalizeDouble(price + tpDistance, g_digits);
+      slType = "ATR";
+   }
+   else
+   {
+      //--- Fixed pip-based SL/TP
+      if(InpStopLossPips > 0)
+      {
+         slDistance = InpStopLossPips * g_pipPoint;
+         sl = NormalizeDouble(price - slDistance, g_digits);
+      }
+
+      if(InpTakeProfitPips > 0)
+      {
+         tpDistance = InpTakeProfitPips * g_pipPoint;
+         tp = NormalizeDouble(price + tpDistance, g_digits);
+      }
+   }
 
    //--- Calculate lot size
    double lots = InpLotSize;
    if(InpUseDynamicLots && sl > 0)
-      lots = CalculateLotSize(MathAbs(price - sl));
+      lots = CalculateLotSize(slDistance);
 
    //--- Normalize lot size
    lots = NormalizeLotSize(lots);
@@ -518,6 +581,10 @@ void OpenBuyPosition()
       Print("Warning: TP adjusted to meet minimum stop level requirement");
    }
 
+   //--- Calculate actual pips for logging
+   double slPips = (price - sl) / g_pipPoint;
+   double tpPips = (tp - price) / g_pipPoint;
+
    //--- Open position
    if(trade.Buy(lots, _Symbol, price, sl, tp, InpTradeComment))
    {
@@ -525,7 +592,10 @@ void OpenBuyPosition()
       Print("=== BUY ORDER OPENED SUCCESSFULLY ===");
       Print("Ticket: ", trade.ResultOrder());
       Print("Lot: ", lots, " | Price: ", price);
-      Print("SL: ", sl, " (", InpStopLossPips, " pips) | TP: ", tp, " (", InpTakeProfitPips, " pips)");
+      Print("SL Type: ", slType, " | R:R Ratio: 1:", DoubleToString(InpRiskRewardRatio, 1));
+      Print("SL: ", sl, " (", DoubleToString(slPips, 1), " pips) | TP: ", tp, " (", DoubleToString(tpPips, 1), " pips)");
+      if(InpUseATRStops)
+         Print("ATR: ", DoubleToString(GetCurrentATR() / g_pipPoint, 1), " pips | Multiplier: ", InpATRMultiplier);
       Print("MACD-V: ", DoubleToString(bufferMACDV[0], 2),
             " | Signal: ", DoubleToString(bufferSignal[0], 2),
             " | Histogram: ", DoubleToString(bufferHistogram[0], 2));
@@ -547,18 +617,50 @@ void OpenSellPosition()
 {
    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double sl = 0, tp = 0;
+   double slDistance = 0;
+   double tpDistance = 0;
+   string slType = "Fixed";
 
    //--- Calculate SL and TP
-   if(InpStopLossPips > 0)
-      sl = NormalizeDouble(price + InpStopLossPips * g_pipPoint, g_digits);
+   if(InpUseATRStops)
+   {
+      //--- ATR-based SL calculation
+      double atrValue = GetCurrentATR();
+      slDistance = atrValue * InpATRMultiplier;
 
-   if(InpTakeProfitPips > 0)
-      tp = NormalizeDouble(price - InpTakeProfitPips * g_pipPoint, g_digits);
+      //--- Apply min/max limits
+      double minSL = InpMinSLPips * g_pipPoint;
+      double maxSL = InpMaxSLPips * g_pipPoint;
+      slDistance = MathMax(slDistance, minSL);
+      slDistance = MathMin(slDistance, maxSL);
+
+      //--- Calculate TP based on R:R ratio
+      tpDistance = slDistance * InpRiskRewardRatio;
+
+      sl = NormalizeDouble(price + slDistance, g_digits);
+      tp = NormalizeDouble(price - tpDistance, g_digits);
+      slType = "ATR";
+   }
+   else
+   {
+      //--- Fixed pip-based SL/TP
+      if(InpStopLossPips > 0)
+      {
+         slDistance = InpStopLossPips * g_pipPoint;
+         sl = NormalizeDouble(price + slDistance, g_digits);
+      }
+
+      if(InpTakeProfitPips > 0)
+      {
+         tpDistance = InpTakeProfitPips * g_pipPoint;
+         tp = NormalizeDouble(price - tpDistance, g_digits);
+      }
+   }
 
    //--- Calculate lot size
    double lots = InpLotSize;
    if(InpUseDynamicLots && sl > 0)
-      lots = CalculateLotSize(MathAbs(sl - price));
+      lots = CalculateLotSize(slDistance);
 
    //--- Normalize lot size
    lots = NormalizeLotSize(lots);
@@ -578,6 +680,10 @@ void OpenSellPosition()
       Print("Warning: TP adjusted to meet minimum stop level requirement");
    }
 
+   //--- Calculate actual pips for logging
+   double slPips = (sl - price) / g_pipPoint;
+   double tpPips = (price - tp) / g_pipPoint;
+
    //--- Open position
    if(trade.Sell(lots, _Symbol, price, sl, tp, InpTradeComment))
    {
@@ -585,7 +691,10 @@ void OpenSellPosition()
       Print("=== SELL ORDER OPENED SUCCESSFULLY ===");
       Print("Ticket: ", trade.ResultOrder());
       Print("Lot: ", lots, " | Price: ", price);
-      Print("SL: ", sl, " (", InpStopLossPips, " pips) | TP: ", tp, " (", InpTakeProfitPips, " pips)");
+      Print("SL Type: ", slType, " | R:R Ratio: 1:", DoubleToString(InpRiskRewardRatio, 1));
+      Print("SL: ", sl, " (", DoubleToString(slPips, 1), " pips) | TP: ", tp, " (", DoubleToString(tpPips, 1), " pips)");
+      if(InpUseATRStops)
+         Print("ATR: ", DoubleToString(GetCurrentATR() / g_pipPoint, 1), " pips | Multiplier: ", InpATRMultiplier);
       Print("MACD-V: ", DoubleToString(bufferMACDV[0], 2),
             " | Signal: ", DoubleToString(bufferSignal[0], 2),
             " | Histogram: ", DoubleToString(bufferHistogram[0], 2));
@@ -857,6 +966,23 @@ double NormalizeLotSize(double lots)
    lots = NormalizeDouble(lots, 2);
 
    return lots;
+}
+
+//+------------------------------------------------------------------+
+//| Get Current ATR Value                                             |
+//+------------------------------------------------------------------+
+double GetCurrentATR()
+{
+   double atr[];
+   ArraySetAsSeries(atr, true);
+
+   if(CopyBuffer(handleATR, 0, 0, 1, atr) < 1)
+   {
+      Print("Warning: Failed to get ATR value. Using default.");
+      return InpMinSLPips * g_pipPoint;
+   }
+
+   return atr[0];
 }
 
 //+------------------------------------------------------------------+
