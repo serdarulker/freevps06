@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Reversal Score Indicator"
 #property link      ""
-#property version   "1.00"
+#property version   "2.00"
 #property description "10 Indicator Reversal Scoring System"
 #property description "RSI, Stoch, CCI, W%R, BB, MACD, MFI, Volume, Divergence, Candle"
 
@@ -111,19 +111,21 @@ input group "=== VOLUME PARAMETRELERI ==="
 input int      InpVolLen            = 20;      // Volume MA Periyot
 input double   InpVolMult           = 1.8;     // Volume Spike Çarpanı
 
-input group "=== FİLTRELER (KALİTE) ==="
+input group "=== FİLTRELER (OPSİYONEL) ==="
 input int      InpMALen             = 50;      // Trend MA Periyot
 input int      InpATRLen            = 14;      // ATR Periyot
+input bool     InpUseContextFilter  = false;   // Context Filtresi (Counter-trend)
+input bool     InpUseOverextFilter  = false;   // Overextension Filtresi
 input double   InpATRMult           = 1.2;     // Overextension ATR Çarpanı
-input bool     InpUseADXFilter      = true;    // ADX Filtresi Kullan
+input bool     InpUseADXFilter      = false;   // ADX Filtresi Kullan
 input int      InpADXLen            = 14;      // ADX Periyot
 input double   InpADXThreshold      = 28.0;    // ADX Eşik (üstü güçlü trend)
 input int      InpPivotLen          = 5;       // Diverjans Pivot Periyot
 
 input group "=== KONFİRMASYON / SPAM ÖNLEME ==="
-input bool     InpRequireConfirm    = true;    // Konfirmasyon Gerekli
+input bool     InpRequireConfirm    = false;   // Konfirmasyon Gerekli
 input int      InpConfirmBars       = 2;       // Konfirmasyon Bar Sayısı
-input int      InpCooldownBars      = 10;      // Cooldown Bar Sayısı
+input int      InpCooldownBars      = 3;       // Cooldown Bar Sayısı
 input bool     InpResolveConflict   = true;    // Bull/Bear Çatışma Çöz
 
 input group "=== GÖRSEL AYARLAR ==="
@@ -134,6 +136,7 @@ input bool     InpShowMA            = true;    // Trend MA Göster
 input color    InpBullColor         = clrLime; // Bull Sinyal Rengi
 input color    InpBearColor         = clrRed;  // Bear Sinyal Rengi
 input int      InpArrowSize         = 3;       // Ok Boyutu (1-5)
+input int      InpMaxLabels         = 50;      // Maksimum Etiket Sayısı
 
 input group "=== YÜKSEK KALİTE SİNYAL ==="
 input int      InpHighScoreMin      = 8;       // Yüksek Kalite Min Skor
@@ -154,53 +157,15 @@ double         buf_BBMiddle[];
 double         buf_BBLower[];
 double         buf_BullSignal[];
 double         buf_BearSignal[];
-double         buf_BullScore[];     // Internal buffer
-double         buf_BearScore[];     // Internal buffer
+double         buf_BullScore[];
+double         buf_BearScore[];
 
 //+------------------------------------------------------------------+
 //| GLOBAL VARIABLES                                                  |
 //+------------------------------------------------------------------+
-// Indicator handles
-int            h_RSI;
-int            h_Stoch;
-int            h_CCI;
-int            h_WR;
-int            h_BB;
-int            h_MACD;
-int            h_MFI;
-int            h_MA;
-int            h_ATR;
-int            h_ADX;
-
-// Internal indicator buffers
-double         ind_RSI[];
-double         ind_StochK[];
-double         ind_StochD[];
-double         ind_CCI[];
-double         ind_WR[];
-double         ind_BBUpper[];
-double         ind_BBMiddle[];
-double         ind_BBLower[];
-double         ind_MACD[];
-double         ind_MACDSignal[];
-double         ind_MFI[];
-double         ind_MA[];
-double         ind_ATR[];
-double         ind_ADX[];
-
-// Divergence tracking
-double         last_pivot_low;
-double         prev_pivot_low;
-double         last_pivot_low_rsi;
-double         prev_pivot_low_rsi;
-double         last_pivot_high;
-double         prev_pivot_high;
-double         last_pivot_high_rsi;
-double         prev_pivot_high_rsi;
-
-// Signal tracking
-int            lastSignalBar;
-string         panelName = "RS_Panel";
+int            h_RSI, h_Stoch, h_CCI, h_WR, h_BB, h_MACD, h_MFI, h_MA, h_ATR, h_ADX;
+int            g_labelCount = 0;
+int            g_lastAlertBar = -1;
 
 //+------------------------------------------------------------------+
 //| Custom indicator initialization function                          |
@@ -261,44 +226,17 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   // Initialize arrays as series
-   ArraySetAsSeries(ind_RSI, true);
-   ArraySetAsSeries(ind_StochK, true);
-   ArraySetAsSeries(ind_StochD, true);
-   ArraySetAsSeries(ind_CCI, true);
-   ArraySetAsSeries(ind_WR, true);
-   ArraySetAsSeries(ind_BBUpper, true);
-   ArraySetAsSeries(ind_BBMiddle, true);
-   ArraySetAsSeries(ind_BBLower, true);
-   ArraySetAsSeries(ind_MACD, true);
-   ArraySetAsSeries(ind_MACDSignal, true);
-   ArraySetAsSeries(ind_MFI, true);
-   ArraySetAsSeries(ind_MA, true);
-   ArraySetAsSeries(ind_ATR, true);
-   ArraySetAsSeries(ind_ADX, true);
-
-   // Initialize divergence tracking
-   last_pivot_low = 0;
-   prev_pivot_low = 0;
-   last_pivot_low_rsi = 0;
-   prev_pivot_low_rsi = 0;
-   last_pivot_high = 0;
-   prev_pivot_high = 0;
-   last_pivot_high_rsi = 0;
-   prev_pivot_high_rsi = 0;
-
-   // Initialize signal tracking
-   lastSignalBar = -InpCooldownBars - 1;
-
    // Set indicator name
-   IndicatorSetString(INDICATOR_SHORTNAME, "Reversal Score [10]");
+   IndicatorSetString(INDICATOR_SHORTNAME, "Reversal Score [10] v2");
    IndicatorSetInteger(INDICATOR_DIGITS, 0);
 
    // Create panel
    if(InpShowPanel)
       CreatePanel();
 
-   Print("Reversal Score Indicator v1.00 initialized");
+   Print("Reversal Score Indicator v2.00 initialized");
+   Print("Min Score: ", InpMinScore, " | Filters: Context=", InpUseContextFilter,
+         " Overext=", InpUseOverextFilter, " ADX=", InpUseADXFilter);
 
    return INIT_SUCCEEDED;
 }
@@ -308,7 +246,6 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   // Release indicator handles
    if(h_RSI != INVALID_HANDLE) IndicatorRelease(h_RSI);
    if(h_Stoch != INVALID_HANDLE) IndicatorRelease(h_Stoch);
    if(h_CCI != INVALID_HANDLE) IndicatorRelease(h_CCI);
@@ -320,9 +257,7 @@ void OnDeinit(const int reason)
    if(h_ATR != INVALID_HANDLE) IndicatorRelease(h_ATR);
    if(h_ADX != INVALID_HANDLE) IndicatorRelease(h_ADX);
 
-   // Delete labels and panel
    ObjectsDeleteAll(0, "RS_");
-
    Comment("");
 }
 
@@ -340,9 +275,46 @@ int OnCalculate(const int rates_total,
                 const long &volume[],
                 const int &spread[])
 {
-   // Check for minimum bars
-   if(rates_total < MathMax(InpMALen, InpBBLen) + 50)
+   // Minimum bars check
+   int min_bars = MathMax(InpMALen, InpMACDSlow) + 50;
+   if(rates_total < min_bars)
       return 0;
+
+   // Copy indicator data
+   double ind_RSI[], ind_StochK[], ind_StochD[], ind_CCI[], ind_WR[];
+   double ind_BBUpper[], ind_BBMiddle[], ind_BBLower[];
+   double ind_MACD[], ind_MACDSignal[], ind_MFI[], ind_MA[], ind_ATR[], ind_ADX[];
+
+   ArraySetAsSeries(ind_RSI, true);
+   ArraySetAsSeries(ind_StochK, true);
+   ArraySetAsSeries(ind_StochD, true);
+   ArraySetAsSeries(ind_CCI, true);
+   ArraySetAsSeries(ind_WR, true);
+   ArraySetAsSeries(ind_BBUpper, true);
+   ArraySetAsSeries(ind_BBMiddle, true);
+   ArraySetAsSeries(ind_BBLower, true);
+   ArraySetAsSeries(ind_MACD, true);
+   ArraySetAsSeries(ind_MACDSignal, true);
+   ArraySetAsSeries(ind_MFI, true);
+   ArraySetAsSeries(ind_MA, true);
+   ArraySetAsSeries(ind_ATR, true);
+   ArraySetAsSeries(ind_ADX, true);
+
+   int copy_count = rates_total;
+   if(CopyBuffer(h_RSI, 0, 0, copy_count, ind_RSI) <= 0) return 0;
+   if(CopyBuffer(h_Stoch, 0, 0, copy_count, ind_StochK) <= 0) return 0;
+   if(CopyBuffer(h_Stoch, 1, 0, copy_count, ind_StochD) <= 0) return 0;
+   if(CopyBuffer(h_CCI, 0, 0, copy_count, ind_CCI) <= 0) return 0;
+   if(CopyBuffer(h_WR, 0, 0, copy_count, ind_WR) <= 0) return 0;
+   if(CopyBuffer(h_BB, 1, 0, copy_count, ind_BBUpper) <= 0) return 0;
+   if(CopyBuffer(h_BB, 0, 0, copy_count, ind_BBMiddle) <= 0) return 0;
+   if(CopyBuffer(h_BB, 2, 0, copy_count, ind_BBLower) <= 0) return 0;
+   if(CopyBuffer(h_MACD, 0, 0, copy_count, ind_MACD) <= 0) return 0;
+   if(CopyBuffer(h_MACD, 1, 0, copy_count, ind_MACDSignal) <= 0) return 0;
+   if(CopyBuffer(h_MFI, 0, 0, copy_count, ind_MFI) <= 0) return 0;
+   if(CopyBuffer(h_MA, 0, 0, copy_count, ind_MA) <= 0) return 0;
+   if(CopyBuffer(h_ATR, 0, 0, copy_count, ind_ATR) <= 0) return 0;
+   if(CopyBuffer(h_ADX, 0, 0, copy_count, ind_ADX) <= 0) return 0;
 
    // Set arrays as series
    ArraySetAsSeries(time, true);
@@ -360,33 +332,22 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(buf_BullScore, true);
    ArraySetAsSeries(buf_BearScore, true);
 
-   // Copy indicator data
-   int bars_to_copy = rates_total - prev_calculated + 1;
-   if(prev_calculated == 0) bars_to_copy = rates_total;
-
-   if(CopyBuffer(h_RSI, 0, 0, bars_to_copy, ind_RSI) < bars_to_copy) return 0;
-   if(CopyBuffer(h_Stoch, 0, 0, bars_to_copy, ind_StochK) < bars_to_copy) return 0;
-   if(CopyBuffer(h_Stoch, 1, 0, bars_to_copy, ind_StochD) < bars_to_copy) return 0;
-   if(CopyBuffer(h_CCI, 0, 0, bars_to_copy, ind_CCI) < bars_to_copy) return 0;
-   if(CopyBuffer(h_WR, 0, 0, bars_to_copy, ind_WR) < bars_to_copy) return 0;
-   if(CopyBuffer(h_BB, 1, 0, bars_to_copy, ind_BBUpper) < bars_to_copy) return 0;
-   if(CopyBuffer(h_BB, 0, 0, bars_to_copy, ind_BBMiddle) < bars_to_copy) return 0;
-   if(CopyBuffer(h_BB, 2, 0, bars_to_copy, ind_BBLower) < bars_to_copy) return 0;
-   if(CopyBuffer(h_MACD, 0, 0, bars_to_copy, ind_MACD) < bars_to_copy) return 0;
-   if(CopyBuffer(h_MACD, 1, 0, bars_to_copy, ind_MACDSignal) < bars_to_copy) return 0;
-   if(CopyBuffer(h_MFI, 0, 0, bars_to_copy, ind_MFI) < bars_to_copy) return 0;
-   if(CopyBuffer(h_MA, 0, 0, bars_to_copy, ind_MA) < bars_to_copy) return 0;
-   if(CopyBuffer(h_ATR, 0, 0, bars_to_copy, ind_ATR) < bars_to_copy) return 0;
-   if(CopyBuffer(h_ADX, 0, 0, bars_to_copy, ind_ADX) < bars_to_copy) return 0;
-
    // Calculate start position
-   int start = prev_calculated == 0 ? rates_total - InpPivotLen * 2 - 10 : rates_total - prev_calculated;
+   int start = prev_calculated == 0 ? rates_total - min_bars : rates_total - prev_calculated + 1;
    if(start < 1) start = 1;
+   if(start >= rates_total) start = rates_total - 1;
+
+   // Divergence tracking (simple version)
+   static double last_pl = 0, prev_pl = 0, last_pl_rsi = 0, prev_pl_rsi = 0;
+   static double last_ph = 0, prev_ph = 0, last_ph_rsi = 0, prev_ph_rsi = 0;
+
+   // Track cooldown
+   static int lastSignalBar = -100;
 
    // Main calculation loop
    for(int i = start; i >= 0; i--)
    {
-      // Copy MA and BB values to display buffers
+      // Copy display buffers
       buf_MA[i] = ind_MA[i];
       buf_BBUpper[i] = ind_BBUpper[i];
       buf_BBMiddle[i] = ind_BBMiddle[i];
@@ -399,395 +360,281 @@ int OnCalculate(const int rates_total,
       buf_BearScore[i] = 0;
 
       // Skip if not enough data
-      if(i + InpPivotLen + 1 >= ArraySize(ind_RSI)) continue;
+      if(i + 2 >= rates_total) continue;
 
-      // Update divergence pivots
-      UpdateDivergencePivots(i, low, high);
+      //=== CALCULATE 10 INDICATOR SIGNALS ===
 
-      // Calculate scores
-      int bullScore = 0;
-      int bearScore = 0;
-      bool highQualityBull = false;
-      bool highQualityBear = false;
-      bool volUp = false;
+      // 1. RSI
+      bool bull_1 = ind_RSI[i] <= InpRSIOS;
+      bool bear_1 = ind_RSI[i] >= InpRSIOB;
 
-      CalculateScores(i, open, high, low, close, tick_volume,
-                      bullScore, bearScore, highQualityBull, highQualityBear, volUp);
+      // 2. Stochastic
+      bool bull_2 = (ind_StochK[i] < InpStochOS) && (ind_StochD[i] < InpStochOS);
+      bool bear_2 = (ind_StochK[i] > InpStochOB) && (ind_StochD[i] > InpStochOB);
+
+      // 3. CCI
+      bool bull_3 = ind_CCI[i] <= -InpCCILevel;
+      bool bear_3 = ind_CCI[i] >= InpCCILevel;
+
+      // 4. Williams %R
+      bool bull_4 = ind_WR[i] <= -InpWROS;
+      bool bear_4 = ind_WR[i] >= -InpWROB;
+
+      // 5. Bollinger Bands (touch + return)
+      bool bull_5 = (low[i] < ind_BBLower[i]) && (close[i] > ind_BBLower[i]);
+      bool bear_5 = (high[i] > ind_BBUpper[i]) && (close[i] < ind_BBUpper[i]);
+
+      // 6. MACD Cross
+      bool macdCrossUp = (ind_MACD[i] > ind_MACDSignal[i]) && (ind_MACD[i+1] <= ind_MACDSignal[i+1]);
+      bool macdCrossDown = (ind_MACD[i] < ind_MACDSignal[i]) && (ind_MACD[i+1] >= ind_MACDSignal[i+1]);
+      bool bull_6 = macdCrossUp && (ind_MACD[i] < 0);
+      bool bear_6 = macdCrossDown && (ind_MACD[i] > 0);
+
+      // 7. MFI
+      bool bull_7 = ind_MFI[i] <= InpMFIOS;
+      bool bear_7 = ind_MFI[i] >= InpMFIOB;
+
+      // 8. Volume
+      double vol = (double)tick_volume[i];
+      double volMA = 0;
+      for(int v = 0; v < InpVolLen && i + v < rates_total; v++)
+         volMA += (double)tick_volume[i + v];
+      volMA /= InpVolLen;
+
+      bool volSpike = (volMA > 0) && (vol >= volMA * InpVolMult);
+      double volRatio = (volMA > 0) ? vol / volMA : 0;
+      bool bull_8 = volSpike && (close[i] > open[i]);
+      bool bear_8 = volSpike && (close[i] < open[i]);
+
+      // 9. Divergence (simplified - check last few bars)
+      bool bull_9 = false, bear_9 = false;
+
+      // Check for pivot low (bullish divergence)
+      if(i + InpPivotLen * 2 < rates_total)
+      {
+         bool isPivotLow = true;
+         double pivotPrice = low[i + InpPivotLen];
+         for(int p = 1; p <= InpPivotLen; p++)
+         {
+            if(low[i + InpPivotLen - p] <= pivotPrice || low[i + InpPivotLen + p] <= pivotPrice)
+            {
+               isPivotLow = false;
+               break;
+            }
+         }
+         if(isPivotLow && prev_pl > 0)
+         {
+            if(pivotPrice < prev_pl && ind_RSI[i + InpPivotLen] > prev_pl_rsi)
+               bull_9 = true;
+         }
+         if(isPivotLow)
+         {
+            prev_pl = last_pl;
+            prev_pl_rsi = last_pl_rsi;
+            last_pl = pivotPrice;
+            last_pl_rsi = ind_RSI[i + InpPivotLen];
+         }
+      }
+
+      // Check for pivot high (bearish divergence)
+      if(i + InpPivotLen * 2 < rates_total)
+      {
+         bool isPivotHigh = true;
+         double pivotPrice = high[i + InpPivotLen];
+         for(int p = 1; p <= InpPivotLen; p++)
+         {
+            if(high[i + InpPivotLen - p] >= pivotPrice || high[i + InpPivotLen + p] >= pivotPrice)
+            {
+               isPivotHigh = false;
+               break;
+            }
+         }
+         if(isPivotHigh && prev_ph > 0)
+         {
+            if(pivotPrice > prev_ph && ind_RSI[i + InpPivotLen] < prev_ph_rsi)
+               bear_9 = true;
+         }
+         if(isPivotHigh)
+         {
+            prev_ph = last_ph;
+            prev_ph_rsi = last_ph_rsi;
+            last_ph = pivotPrice;
+            last_ph_rsi = ind_RSI[i + InpPivotLen];
+         }
+      }
+
+      // 10. Candle Patterns
+      double body = MathAbs(close[i] - open[i]);
+      double range = high[i] - low[i];
+      double upperWick = high[i] - MathMax(close[i], open[i]);
+      double lowerWick = MathMin(close[i], open[i]) - low[i];
+
+      bool smallBody = (range > 0) && (body <= range * 0.35);
+      bool hammer = smallBody && (lowerWick >= body * 2.0) && (upperWick <= body * 0.6);
+      bool shootingStar = smallBody && (upperWick >= body * 2.0) && (lowerWick <= body * 0.6);
+
+      bool bullEngulf = (close[i] > open[i]) && (close[i+1] < open[i+1]) &&
+                        (close[i] >= open[i+1]) && (open[i] <= close[i+1]);
+      bool bearEngulf = (close[i] < open[i]) && (close[i+1] > open[i+1]) &&
+                        (close[i] <= open[i+1]) && (open[i] >= close[i+1]);
+
+      bool bull_10 = hammer || bullEngulf;
+      bool bear_10 = shootingStar || bearEngulf;
+
+      //=== CALCULATE SCORES ===
+      int maxPossible = InpWeightRSI + InpWeightStoch + InpWeightCCI + InpWeightWR +
+                        InpWeightBB + InpWeightMACD + InpWeightMFI + InpWeightVol +
+                        InpWeightDiv + InpWeightCandle;
+
+      int bullWeighted = (bull_1 ? InpWeightRSI : 0) + (bull_2 ? InpWeightStoch : 0) +
+                         (bull_3 ? InpWeightCCI : 0) + (bull_4 ? InpWeightWR : 0) +
+                         (bull_5 ? InpWeightBB : 0) + (bull_6 ? InpWeightMACD : 0) +
+                         (bull_7 ? InpWeightMFI : 0) + (bull_8 ? InpWeightVol : 0) +
+                         (bull_9 ? InpWeightDiv : 0) + (bull_10 ? InpWeightCandle : 0);
+
+      int bearWeighted = (bear_1 ? InpWeightRSI : 0) + (bear_2 ? InpWeightStoch : 0) +
+                         (bear_3 ? InpWeightCCI : 0) + (bear_4 ? InpWeightWR : 0) +
+                         (bear_5 ? InpWeightBB : 0) + (bear_6 ? InpWeightMACD : 0) +
+                         (bear_7 ? InpWeightMFI : 0) + (bear_8 ? InpWeightVol : 0) +
+                         (bear_9 ? InpWeightDiv : 0) + (bear_10 ? InpWeightCandle : 0);
+
+      int bullScore, bearScore;
+      if(InpUseWeighted)
+      {
+         bullScore = (int)MathRound((double)bullWeighted * 10.0 / maxPossible);
+         bearScore = (int)MathRound((double)bearWeighted * 10.0 / maxPossible);
+      }
+      else
+      {
+         bullScore = (bull_1?1:0) + (bull_2?1:0) + (bull_3?1:0) + (bull_4?1:0) + (bull_5?1:0) +
+                     (bull_6?1:0) + (bull_7?1:0) + (bull_8?1:0) + (bull_9?1:0) + (bull_10?1:0);
+         bearScore = (bear_1?1:0) + (bear_2?1:0) + (bear_3?1:0) + (bear_4?1:0) + (bear_5?1:0) +
+                     (bear_6?1:0) + (bear_7?1:0) + (bear_8?1:0) + (bear_9?1:0) + (bear_10?1:0);
+      }
 
       buf_BullScore[i] = bullScore;
       buf_BearScore[i] = bearScore;
 
-      // Generate signals only for bar 1 (closed bar) when at bar 0
-      if(i == 0)
+      //=== APPLY FILTERS ===
+      bool bullOK = (bullScore >= InpMinScore);
+      bool bearOK = (bearScore >= InpMinScore);
+
+      // Context filter (counter-trend)
+      if(InpUseContextFilter)
       {
-         int idx = 1;
-         bool bullSignal = false;
-         bool bearSignal = false;
+         bullOK = bullOK && (close[i] < ind_MA[i]);
+         bearOK = bearOK && (close[i] > ind_MA[i]);
+      }
 
-         GenerateSignals(idx, open, close, (int)buf_BullScore[idx], (int)buf_BearScore[idx],
-                         bullSignal, bearSignal);
+      // Overextension filter
+      if(InpUseOverextFilter)
+      {
+         bool overext = MathAbs(close[i] - ind_MA[i]) > ind_ATR[i] * InpATRMult;
+         bullOK = bullOK && overext;
+         bearOK = bearOK && overext;
+      }
 
-         // Check cooldown
-         int currentBar = rates_total;
-         bool canFire = (InpCooldownBars == 0) || (currentBar - lastSignalBar > InpCooldownBars);
+      // ADX filter
+      if(InpUseADXFilter)
+      {
+         bool momentumOK = ind_ADX[i] <= InpADXThreshold;
+         bullOK = bullOK && momentumOK;
+         bearOK = bearOK && momentumOK;
+      }
 
-         if(canFire)
+      // Confirmation filter
+      if(InpRequireConfirm)
+      {
+         if(InpConfirmBars == 1)
          {
-            if(bullSignal)
+            bullOK = bullOK && (close[i] > open[i]);
+            bearOK = bearOK && (close[i] < open[i]);
+         }
+         else
+         {
+            int bullishCount = 0, bearishCount = 0;
+            for(int c = 0; c < InpConfirmBars && i + c < rates_total; c++)
             {
-               buf_BullSignal[idx] = low[idx] - ind_ATR[idx] * 0.5;
-               lastSignalBar = currentBar;
-
-               // Create label
-               if(InpShowLabels)
-                  CreateSignalLabel(time[idx], buf_BullSignal[idx], (int)buf_BullScore[idx], true, highQualityBull);
-
-               // Send alerts
-               SendAlert("BULL", (int)buf_BullScore[idx], highQualityBull);
+               if(close[i + c] > open[i + c]) bullishCount++;
+               if(close[i + c] < open[i + c]) bearishCount++;
             }
-            else if(bearSignal)
+            bullOK = bullOK && (bullishCount >= (int)(InpConfirmBars * 0.67));
+            bearOK = bearOK && (bearishCount >= (int)(InpConfirmBars * 0.67));
+         }
+      }
+
+      // Resolve conflict
+      if(InpResolveConflict && bullOK && bearOK)
+      {
+         bullOK = bullScore > bearScore;
+         bearOK = bearScore > bullScore;
+      }
+
+      // Cooldown check
+      int barIndex = rates_total - 1 - i;
+      bool canFire = (InpCooldownBars == 0) || (barIndex - lastSignalBar > InpCooldownBars);
+
+      //=== GENERATE SIGNALS ===
+      if(canFire)
+      {
+         if(bullOK)
+         {
+            buf_BullSignal[i] = low[i] - ind_ATR[i] * 0.5;
+            lastSignalBar = barIndex;
+
+            // Create label
+            if(InpShowLabels && g_labelCount < InpMaxLabels)
             {
-               buf_BearSignal[idx] = high[idx] + ind_ATR[idx] * 0.5;
-               lastSignalBar = currentBar;
+               string labelName = "RS_L_" + IntegerToString(barIndex);
+               ObjectCreate(0, labelName, OBJ_TEXT, 0, time[i], buf_BullSignal[i] - ind_ATR[i] * 0.3);
+               ObjectSetString(0, labelName, OBJPROP_TEXT, "B" + IntegerToString(bullScore));
+               ObjectSetInteger(0, labelName, OBJPROP_COLOR, InpBullColor);
+               ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 9);
+               ObjectSetString(0, labelName, OBJPROP_FONT, "Arial Bold");
+               ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_TOP);
+               g_labelCount++;
+            }
 
-               // Create label
-               if(InpShowLabels)
-                  CreateSignalLabel(time[idx], buf_BearSignal[idx], (int)buf_BearScore[idx], false, highQualityBear);
-
-               // Send alerts
-               SendAlert("BEAR", (int)buf_BearScore[idx], highQualityBear);
+            // Alert for current bar only
+            if(i == 0 && barIndex != g_lastAlertBar)
+            {
+               SendAlert("BULL", bullScore, bullScore >= InpHighScoreMin);
+               g_lastAlertBar = barIndex;
             }
          }
+         else if(bearOK)
+         {
+            buf_BearSignal[i] = high[i] + ind_ATR[i] * 0.5;
+            lastSignalBar = barIndex;
 
-         // Update panel
-         if(InpShowPanel)
-            UpdatePanel((int)buf_BullScore[1], (int)buf_BearScore[1]);
+            // Create label
+            if(InpShowLabels && g_labelCount < InpMaxLabels)
+            {
+               string labelName = "RS_L_" + IntegerToString(barIndex);
+               ObjectCreate(0, labelName, OBJ_TEXT, 0, time[i], buf_BearSignal[i] + ind_ATR[i] * 0.3);
+               ObjectSetString(0, labelName, OBJPROP_TEXT, "S" + IntegerToString(bearScore));
+               ObjectSetInteger(0, labelName, OBJPROP_COLOR, InpBearColor);
+               ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 9);
+               ObjectSetString(0, labelName, OBJPROP_FONT, "Arial Bold");
+               ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
+               g_labelCount++;
+            }
+
+            // Alert for current bar only
+            if(i == 0 && barIndex != g_lastAlertBar)
+            {
+               SendAlert("BEAR", bearScore, bearScore >= InpHighScoreMin);
+               g_lastAlertBar = barIndex;
+            }
+         }
       }
    }
+
+   // Update panel with latest scores
+   if(InpShowPanel)
+      UpdatePanel((int)buf_BullScore[0], (int)buf_BearScore[0]);
 
    return rates_total;
-}
-
-//+------------------------------------------------------------------+
-//| Update divergence pivot points                                    |
-//+------------------------------------------------------------------+
-void UpdateDivergencePivots(int idx, const double &low[], const double &high[])
-{
-   int shift = idx + InpPivotLen;
-
-   // Check for pivot low
-   double pivotLow = FindPivotLow(shift, low);
-   if(pivotLow > 0)
-   {
-      prev_pivot_low = last_pivot_low;
-      last_pivot_low = pivotLow;
-      prev_pivot_low_rsi = last_pivot_low_rsi;
-      last_pivot_low_rsi = ind_RSI[shift];
-   }
-
-   // Check for pivot high
-   double pivotHigh = FindPivotHigh(shift, high);
-   if(pivotHigh > 0)
-   {
-      prev_pivot_high = last_pivot_high;
-      last_pivot_high = pivotHigh;
-      prev_pivot_high_rsi = last_pivot_high_rsi;
-      last_pivot_high_rsi = ind_RSI[shift];
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Find pivot low                                                    |
-//+------------------------------------------------------------------+
-double FindPivotLow(int shift, const double &low[])
-{
-   if(shift + InpPivotLen >= ArraySize(low) || shift - InpPivotLen < 0)
-      return 0;
-
-   double lowVal = low[shift];
-
-   for(int i = 1; i <= InpPivotLen; i++)
-   {
-      if(low[shift - i] <= lowVal) return 0;
-      if(low[shift + i] <= lowVal) return 0;
-   }
-
-   return lowVal;
-}
-
-//+------------------------------------------------------------------+
-//| Find pivot high                                                   |
-//+------------------------------------------------------------------+
-double FindPivotHigh(int shift, const double &high[])
-{
-   if(shift + InpPivotLen >= ArraySize(high) || shift - InpPivotLen < 0)
-      return 0;
-
-   double highVal = high[shift];
-
-   for(int i = 1; i <= InpPivotLen; i++)
-   {
-      if(high[shift - i] >= highVal) return 0;
-      if(high[shift + i] >= highVal) return 0;
-   }
-
-   return highVal;
-}
-
-//+------------------------------------------------------------------+
-//| Calculate bull and bear scores                                    |
-//+------------------------------------------------------------------+
-void CalculateScores(int idx, const double &open[], const double &high[],
-                     const double &low[], const double &close[], const long &tick_volume[],
-                     int &bullScore, int &bearScore, bool &highBull, bool &highBear, bool &volUp)
-{
-   // Individual indicator signals
-   bool bull_1 = false, bear_1 = false; // RSI
-   bool bull_2 = false, bear_2 = false; // Stoch
-   bool bull_3 = false, bear_3 = false; // CCI
-   bool bull_4 = false, bear_4 = false; // W%R
-   bool bull_5 = false, bear_5 = false; // BB
-   bool bull_6 = false, bear_6 = false; // MACD
-   bool bull_7 = false, bear_7 = false; // MFI
-   bool bull_8 = false, bear_8 = false; // Volume
-   bool bull_9 = false, bear_9 = false; // Divergence
-   bool bull_10 = false, bear_10 = false; // Candle
-
-   // 1. RSI
-   bull_1 = ind_RSI[idx] <= InpRSIOS;
-   bear_1 = ind_RSI[idx] >= InpRSIOB;
-
-   // 2. Stochastic
-   bull_2 = (ind_StochK[idx] < InpStochOS) && (ind_StochD[idx] < InpStochOS);
-   bear_2 = (ind_StochK[idx] > InpStochOB) && (ind_StochD[idx] > InpStochOB);
-
-   // 3. CCI
-   bull_3 = ind_CCI[idx] <= -InpCCILevel;
-   bear_3 = ind_CCI[idx] >= InpCCILevel;
-
-   // 4. Williams %R
-   bull_4 = ind_WR[idx] <= -InpWROS;
-   bear_4 = ind_WR[idx] >= -InpWROB;
-
-   // 5. Bollinger Bands
-   bull_5 = (low[idx] < ind_BBLower[idx]) && (close[idx] > ind_BBLower[idx]);
-   bear_5 = (high[idx] > ind_BBUpper[idx]) && (close[idx] < ind_BBUpper[idx]);
-
-   // 6. MACD Cross
-   if(idx + 1 < ArraySize(ind_MACD))
-   {
-      bool macdCrossUp = (ind_MACD[idx] > ind_MACDSignal[idx]) && (ind_MACD[idx+1] <= ind_MACDSignal[idx+1]);
-      bool macdCrossDown = (ind_MACD[idx] < ind_MACDSignal[idx]) && (ind_MACD[idx+1] >= ind_MACDSignal[idx+1]);
-
-      bull_6 = macdCrossUp && (ind_MACD[idx] < 0);
-      bear_6 = macdCrossDown && (ind_MACD[idx] > 0);
-   }
-
-   // 7. MFI
-   bull_7 = ind_MFI[idx] <= InpMFIOS;
-   bear_7 = ind_MFI[idx] >= InpMFIOB;
-
-   // 8. Volume
-   double volume1 = (double)tick_volume[idx];
-   double volMA_Long = GetVolumeMA(InpVolLen, idx, tick_volume);
-   double volMA_Short = GetVolumeMA(10, idx, tick_volume);
-
-   volUp = volMA_Short > volMA_Long;
-   bool volSpike = (volMA_Long > 0) && (volume1 >= volMA_Long * InpVolMult);
-   double volRatio = (volMA_Long > 0) ? volume1 / volMA_Long : 0;
-
-   bull_8 = volSpike && (close[idx] > open[idx]) && volUp && (volRatio > 1.5);
-   bear_8 = volSpike && (close[idx] < open[idx]) && volUp && (volRatio > 1.5);
-
-   // 9. RSI Divergence
-   if(prev_pivot_low > 0 && last_pivot_low > 0)
-   {
-      bull_9 = (last_pivot_low < prev_pivot_low) &&
-               (last_pivot_low_rsi > prev_pivot_low_rsi) &&
-               (last_pivot_low_rsi < 50);
-   }
-
-   if(prev_pivot_high > 0 && last_pivot_high > 0)
-   {
-      bear_9 = (last_pivot_high > prev_pivot_high) &&
-               (last_pivot_high_rsi < prev_pivot_high_rsi) &&
-               (last_pivot_high_rsi > 50);
-   }
-
-   // 10. Candle Patterns
-   double body = MathAbs(close[idx] - open[idx]);
-   double range = high[idx] - low[idx];
-   double upperWick = high[idx] - MathMax(close[idx], open[idx]);
-   double lowerWick = MathMin(close[idx], open[idx]) - low[idx];
-
-   bool smallBody = (body > 0) && (range > 0) && (body <= range * 0.35);
-   bool hammer = smallBody && (lowerWick >= body * 2.0) && (upperWick <= body * 0.6);
-   bool shootingStar = smallBody && (upperWick >= body * 2.0) && (lowerWick <= body * 0.6);
-
-   // Engulfing patterns
-   if(idx + 1 < ArraySize(close))
-   {
-      bool bullEngulf = (close[idx] > open[idx]) && (close[idx+1] < open[idx+1]) &&
-                        (close[idx] >= open[idx+1]) && (open[idx] <= close[idx+1]);
-      bool bearEngulf = (close[idx] < open[idx]) && (close[idx+1] > open[idx+1]) &&
-                        (close[idx] <= open[idx+1]) && (open[idx] >= close[idx+1]);
-
-      bull_10 = hammer || bullEngulf;
-      bear_10 = shootingStar || bearEngulf;
-   }
-   else
-   {
-      bull_10 = hammer;
-      bear_10 = shootingStar;
-   }
-
-   // Calculate weighted scores
-   int maxPossible = InpWeightRSI + InpWeightStoch + InpWeightCCI + InpWeightWR +
-                     InpWeightBB + InpWeightMACD + InpWeightMFI + InpWeightVol +
-                     InpWeightDiv + InpWeightCandle;
-
-   int bullWeighted = (bull_1 ? InpWeightRSI : 0) + (bull_2 ? InpWeightStoch : 0) +
-                      (bull_3 ? InpWeightCCI : 0) + (bull_4 ? InpWeightWR : 0) +
-                      (bull_5 ? InpWeightBB : 0) + (bull_6 ? InpWeightMACD : 0) +
-                      (bull_7 ? InpWeightMFI : 0) + (bull_8 ? InpWeightVol : 0) +
-                      (bull_9 ? InpWeightDiv : 0) + (bull_10 ? InpWeightCandle : 0);
-
-   int bearWeighted = (bear_1 ? InpWeightRSI : 0) + (bear_2 ? InpWeightStoch : 0) +
-                      (bear_3 ? InpWeightCCI : 0) + (bear_4 ? InpWeightWR : 0) +
-                      (bear_5 ? InpWeightBB : 0) + (bear_6 ? InpWeightMACD : 0) +
-                      (bear_7 ? InpWeightMFI : 0) + (bear_8 ? InpWeightVol : 0) +
-                      (bear_9 ? InpWeightDiv : 0) + (bear_10 ? InpWeightCandle : 0);
-
-   if(InpUseWeighted)
-   {
-      bullScore = NormalizeScore(bullWeighted, maxPossible);
-      bearScore = NormalizeScore(bearWeighted, maxPossible);
-   }
-   else
-   {
-      bullScore = (bull_1?1:0) + (bull_2?1:0) + (bull_3?1:0) + (bull_4?1:0) + (bull_5?1:0) +
-                  (bull_6?1:0) + (bull_7?1:0) + (bull_8?1:0) + (bull_9?1:0) + (bull_10?1:0);
-      bearScore = (bear_1?1:0) + (bear_2?1:0) + (bear_3?1:0) + (bear_4?1:0) + (bear_5?1:0) +
-                  (bear_6?1:0) + (bear_7?1:0) + (bear_8?1:0) + (bear_9?1:0) + (bear_10?1:0);
-   }
-
-   // High quality signals
-   highBull = (bullScore >= InpHighScoreMin) && volUp && (volRatio > InpHighVolRatio) && (bull_9 || bull_10);
-   highBear = (bearScore >= InpHighScoreMin) && volUp && (volRatio > InpHighVolRatio) && (bear_9 || bear_10);
-}
-
-//+------------------------------------------------------------------+
-//| Normalize score to 0-10 range                                     |
-//+------------------------------------------------------------------+
-int NormalizeScore(int weighted, int maxPossible)
-{
-   if(maxPossible == 0) return 0;
-   double normalized = (double)weighted * 10.0 / (double)maxPossible;
-   return (int)MathMin(MathMax(MathRound(normalized), 0), 10);
-}
-
-//+------------------------------------------------------------------+
-//| Get volume moving average                                         |
-//+------------------------------------------------------------------+
-double GetVolumeMA(int period, int shift, const long &tick_volume[])
-{
-   if(shift + period >= ArraySize(tick_volume))
-      return 0;
-
-   double sum = 0;
-   for(int i = 0; i < period; i++)
-   {
-      sum += (double)tick_volume[shift + i];
-   }
-   return sum / period;
-}
-
-//+------------------------------------------------------------------+
-//| Generate trading signals                                          |
-//+------------------------------------------------------------------+
-void GenerateSignals(int idx, const double &open[], const double &close[],
-                     int bullScore, int bearScore, bool &bullSignal, bool &bearSignal)
-{
-   // Context filters
-   bool bullCtx = close[idx] < ind_MA[idx]; // Counter-trend: price below MA
-   bool bearCtx = close[idx] > ind_MA[idx]; // Counter-trend: price above MA
-
-   // Overextension filter
-   bool overext = MathAbs(close[idx] - ind_MA[idx]) > ind_ATR[idx] * InpATRMult;
-
-   // ADX filter
-   bool momentumOk = (!InpUseADXFilter) || (ind_ADX[idx] <= InpADXThreshold);
-
-   // Base signals
-   bool baseBull = bullScore >= InpMinScore;
-   bool baseBear = bearScore >= InpMinScore;
-
-   // Apply filters
-   bool bullFiltered = baseBull && bullCtx && overext && momentumOk;
-   bool bearFiltered = baseBear && bearCtx && overext && momentumOk;
-
-   // Apply confirmation
-   bool bullConfirmed = bullFiltered;
-   bool bearConfirmed = bearFiltered;
-
-   if(InpRequireConfirm)
-   {
-      if(InpConfirmBars == 1)
-      {
-         bullConfirmed = bullFiltered && (close[idx] > open[idx]);
-         bearConfirmed = bearFiltered && (close[idx] < open[idx]);
-      }
-      else
-      {
-         int bullishBars = 0;
-         int bearishBars = 0;
-
-         for(int i = idx; i < idx + InpConfirmBars && i < ArraySize(close); i++)
-         {
-            if(close[i] > open[i]) bullishBars++;
-            if(close[i] < open[i]) bearishBars++;
-         }
-
-         double bullFrac = (double)bullishBars / InpConfirmBars;
-         double bearFrac = (double)bearishBars / InpConfirmBars;
-
-         bullConfirmed = bullFiltered && (bullFrac >= 0.67);
-         bearConfirmed = bearFiltered && (bearFrac >= 0.67);
-      }
-   }
-
-   // Resolve conflict
-   bullSignal = bullConfirmed;
-   bearSignal = bearConfirmed;
-
-   if(InpResolveConflict && bullConfirmed && bearConfirmed)
-   {
-      bullSignal = bullScore > bearScore;
-      bearSignal = bearScore > bullScore;
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Create signal label                                               |
-//+------------------------------------------------------------------+
-void CreateSignalLabel(datetime time, double price, int score, bool isBull, bool highQuality)
-{
-   string labelName = "RS_Label_" + TimeToString(time, TIME_DATE|TIME_MINUTES);
-
-   // Delete if exists
-   ObjectDelete(0, labelName);
-
-   // Create label
-   ObjectCreate(0, labelName, OBJ_TEXT, 0, time, price);
-
-   string text = (isBull ? "B " : "S ") + IntegerToString(score);
-   if(highQuality) text += " HQ";
-
-   ObjectSetString(0, labelName, OBJPROP_TEXT, text);
-   ObjectSetInteger(0, labelName, OBJPROP_COLOR, isBull ? InpBullColor : InpBearColor);
-   ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 10);
-   ObjectSetString(0, labelName, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, isBull ? ANCHOR_TOP : ANCHOR_BOTTOM);
 }
 
 //+------------------------------------------------------------------+
@@ -795,79 +642,60 @@ void CreateSignalLabel(datetime time, double price, int score, bool isBull, bool
 //+------------------------------------------------------------------+
 void CreatePanel()
 {
-   int x = 10;
-   int y = 30;
-   int width = 180;
-   int height = 80;
+   int x = 10, y = 30, w = 180, h = 80;
 
-   // Background
-   string bgName = "RS_Panel_BG";
-   ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, x);
-   ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, y);
-   ObjectSetInteger(0, bgName, OBJPROP_XSIZE, width);
-   ObjectSetInteger(0, bgName, OBJPROP_YSIZE, height);
-   ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, clrBlack);
-   ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-   ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, clrGray);
-   ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+   ObjectCreate(0, "RS_PanelBG", OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "RS_PanelBG", OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, "RS_PanelBG", OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, "RS_PanelBG", OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, "RS_PanelBG", OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, "RS_PanelBG", OBJPROP_BGCOLOR, clrBlack);
+   ObjectSetInteger(0, "RS_PanelBG", OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, "RS_PanelBG", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
 
-   // Title
-   string titleName = "RS_Panel_Title";
-   ObjectCreate(0, titleName, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, titleName, OBJPROP_XDISTANCE, x + width/2);
-   ObjectSetInteger(0, titleName, OBJPROP_YDISTANCE, y + 5);
-   ObjectSetString(0, titleName, OBJPROP_TEXT, "REVERSAL SCORE");
-   ObjectSetInteger(0, titleName, OBJPROP_COLOR, clrWhite);
-   ObjectSetInteger(0, titleName, OBJPROP_FONTSIZE, 9);
-   ObjectSetString(0, titleName, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(0, titleName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0, titleName, OBJPROP_ANCHOR, ANCHOR_CENTER);
+   ObjectCreate(0, "RS_Title", OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "RS_Title", OBJPROP_XDISTANCE, x + w/2);
+   ObjectSetInteger(0, "RS_Title", OBJPROP_YDISTANCE, y + 8);
+   ObjectSetString(0, "RS_Title", OBJPROP_TEXT, "REVERSAL SCORE");
+   ObjectSetInteger(0, "RS_Title", OBJPROP_COLOR, clrWhite);
+   ObjectSetInteger(0, "RS_Title", OBJPROP_FONTSIZE, 9);
+   ObjectSetString(0, "RS_Title", OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, "RS_Title", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, "RS_Title", OBJPROP_ANCHOR, ANCHOR_CENTER);
 
-   // Bull label
-   string bullLabelName = "RS_Panel_BullLabel";
-   ObjectCreate(0, bullLabelName, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, bullLabelName, OBJPROP_XDISTANCE, x + width - 45);
-   ObjectSetInteger(0, bullLabelName, OBJPROP_YDISTANCE, y + 30);
-   ObjectSetString(0, bullLabelName, OBJPROP_TEXT, "BULL");
-   ObjectSetInteger(0, bullLabelName, OBJPROP_COLOR, clrLime);
-   ObjectSetInteger(0, bullLabelName, OBJPROP_FONTSIZE, 9);
-   ObjectSetString(0, bullLabelName, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(0, bullLabelName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectCreate(0, "RS_BullLbl", OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "RS_BullLbl", OBJPROP_XDISTANCE, x + w - 50);
+   ObjectSetInteger(0, "RS_BullLbl", OBJPROP_YDISTANCE, y + 30);
+   ObjectSetString(0, "RS_BullLbl", OBJPROP_TEXT, "BULL");
+   ObjectSetInteger(0, "RS_BullLbl", OBJPROP_COLOR, clrLime);
+   ObjectSetInteger(0, "RS_BullLbl", OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, "RS_BullLbl", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
 
-   // Bear label
-   string bearLabelName = "RS_Panel_BearLabel";
-   ObjectCreate(0, bearLabelName, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, bearLabelName, OBJPROP_XDISTANCE, x + 45);
-   ObjectSetInteger(0, bearLabelName, OBJPROP_YDISTANCE, y + 30);
-   ObjectSetString(0, bearLabelName, OBJPROP_TEXT, "BEAR");
-   ObjectSetInteger(0, bearLabelName, OBJPROP_COLOR, clrRed);
-   ObjectSetInteger(0, bearLabelName, OBJPROP_FONTSIZE, 9);
-   ObjectSetString(0, bearLabelName, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(0, bearLabelName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectCreate(0, "RS_BearLbl", OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "RS_BearLbl", OBJPROP_XDISTANCE, x + 50);
+   ObjectSetInteger(0, "RS_BearLbl", OBJPROP_YDISTANCE, y + 30);
+   ObjectSetString(0, "RS_BearLbl", OBJPROP_TEXT, "BEAR");
+   ObjectSetInteger(0, "RS_BearLbl", OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, "RS_BearLbl", OBJPROP_FONTSIZE, 9);
+   ObjectSetInteger(0, "RS_BearLbl", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
 
-   // Bull score
-   string bullScoreName = "RS_Panel_BullScore";
-   ObjectCreate(0, bullScoreName, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, bullScoreName, OBJPROP_XDISTANCE, x + width - 45);
-   ObjectSetInteger(0, bullScoreName, OBJPROP_YDISTANCE, y + 50);
-   ObjectSetString(0, bullScoreName, OBJPROP_TEXT, "0 / 10");
-   ObjectSetInteger(0, bullScoreName, OBJPROP_COLOR, clrLime);
-   ObjectSetInteger(0, bullScoreName, OBJPROP_FONTSIZE, 12);
-   ObjectSetString(0, bullScoreName, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(0, bullScoreName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectCreate(0, "RS_BullVal", OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "RS_BullVal", OBJPROP_XDISTANCE, x + w - 50);
+   ObjectSetInteger(0, "RS_BullVal", OBJPROP_YDISTANCE, y + 52);
+   ObjectSetString(0, "RS_BullVal", OBJPROP_TEXT, "0 / 10");
+   ObjectSetInteger(0, "RS_BullVal", OBJPROP_COLOR, clrLime);
+   ObjectSetInteger(0, "RS_BullVal", OBJPROP_FONTSIZE, 12);
+   ObjectSetString(0, "RS_BullVal", OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, "RS_BullVal", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
 
-   // Bear score
-   string bearScoreName = "RS_Panel_BearScore";
-   ObjectCreate(0, bearScoreName, OBJ_LABEL, 0, 0, 0);
-   ObjectSetInteger(0, bearScoreName, OBJPROP_XDISTANCE, x + 45);
-   ObjectSetInteger(0, bearScoreName, OBJPROP_YDISTANCE, y + 50);
-   ObjectSetString(0, bearScoreName, OBJPROP_TEXT, "0 / 10");
-   ObjectSetInteger(0, bearScoreName, OBJPROP_COLOR, clrRed);
-   ObjectSetInteger(0, bearScoreName, OBJPROP_FONTSIZE, 12);
-   ObjectSetString(0, bearScoreName, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(0, bearScoreName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectCreate(0, "RS_BearVal", OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, "RS_BearVal", OBJPROP_XDISTANCE, x + 50);
+   ObjectSetInteger(0, "RS_BearVal", OBJPROP_YDISTANCE, y + 52);
+   ObjectSetString(0, "RS_BearVal", OBJPROP_TEXT, "0 / 10");
+   ObjectSetInteger(0, "RS_BearVal", OBJPROP_COLOR, clrRed);
+   ObjectSetInteger(0, "RS_BearVal", OBJPROP_FONTSIZE, 12);
+   ObjectSetString(0, "RS_BearVal", OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, "RS_BearVal", OBJPROP_CORNER, CORNER_RIGHT_UPPER);
 }
 
 //+------------------------------------------------------------------+
@@ -875,13 +703,8 @@ void CreatePanel()
 //+------------------------------------------------------------------+
 void UpdatePanel(int bullScore, int bearScore)
 {
-   string bullScoreName = "RS_Panel_BullScore";
-   string bearScoreName = "RS_Panel_BearScore";
-
-   ObjectSetString(0, bullScoreName, OBJPROP_TEXT, IntegerToString(bullScore) + " / 10");
-   ObjectSetString(0, bearScoreName, OBJPROP_TEXT, IntegerToString(bearScore) + " / 10");
-
-   ChartRedraw(0);
+   ObjectSetString(0, "RS_BullVal", OBJPROP_TEXT, IntegerToString(bullScore) + " / 10");
+   ObjectSetString(0, "RS_BearVal", OBJPROP_TEXT, IntegerToString(bearScore) + " / 10");
 }
 
 //+------------------------------------------------------------------+
@@ -889,20 +712,12 @@ void UpdatePanel(int bullScore, int bearScore)
 //+------------------------------------------------------------------+
 void SendAlert(string direction, int score, bool highQuality)
 {
-   string hqText = highQuality ? " [HIGH QUALITY]" : "";
-   string message = StringFormat("%s: %s Reversal Signal! Score: %d/10%s",
-                                 _Symbol, direction, score, hqText);
+   string hq = highQuality ? " [HQ]" : "";
+   string msg = StringFormat("%s: %s Signal! Score: %d/10%s", _Symbol, direction, score, hq);
 
-   if(InpAlertPopup)
-      Alert(message);
-
-   if(InpAlertSound)
-      PlaySound("alert.wav");
-
-   if(InpAlertPush)
-      SendNotification(message);
-
-   if(InpAlertEmail)
-      SendMail("Reversal Score Alert - " + _Symbol, message);
+   if(InpAlertPopup) Alert(msg);
+   if(InpAlertSound) PlaySound("alert.wav");
+   if(InpAlertPush) SendNotification(msg);
+   if(InpAlertEmail) SendMail("Reversal Score - " + _Symbol, msg);
 }
 //+------------------------------------------------------------------+
